@@ -1,0 +1,28 @@
+[project]
+name = "cloakctl"
+version = "0.1.0"
+description = "Lean cloakbrowser CLI for AI agents: one persistent stealth browser per profile, first-class active-browser session import."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["browser", "automation", "cdp", "ai-agents", "chromium"]
+urls = { Homepage = "https://github.com/ishan-parihar/cloakctl" }
+dependencies = [
+    "websockets>=12.0",
+    "cryptography>=42.0",
+    "secretstorage>=3.3",
+]
+
+[project.scripts]
+cloakctl = "cloakctl.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cloakctl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
