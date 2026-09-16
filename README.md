@@ -117,6 +117,27 @@ Page text ships in `[UNTRUSTED_PAGE_CONTENT nonce=...]` markers (data, not instr
 - **Detached browser** (setsid); `close` is SIGTERM → SIGKILL with cookie flush + orphan sweep.
 - **JSON-always**: every failure is a JSON error + nonzero exit.
 
+## Resource utilization (measured 2026-09-16, `tests/live_load.py`)
+
+Whole browser process tree as the OOM killer sees it (headless Chromium on
+this box; varies by build/flags). Zero strays after every suite.
+
+| probe | latency | memory |
+|---|---|---|
+| cold launch, 1 blank tab | ~0.4s | ~1.1 GB RSS |
+| same browser, 5 heavy tabs | — | ~1.5 GB RSS |
+| snapshot / exec round-trip | ~130 ms | — |
+| 4 live profiles, total | — | ~5.0 GB RSS |
+| 4 parallel `wf run --new-tab` (4/4 ok) | ~1s wall | peak ≈ steady |
+| disk per fresh profile | — | ~5 MB |
+
+VPS sizing: budget **~1.2 GB RAM per live profile** plus headroom — a 2 GB
+box fits 1 profile comfortably, 4 GB fits 2–3, 8 GB fits 6. The CLI itself
+is idle Python (no daemons); `CLOAKCTL_MIN_MEM_MB` refuses launches below
+400 MB free. cloakctl is a **system install** (launches the local Chromium
+binary directly — no Docker); in a container add `--browser-arg=--no-sandbox`
+and note v20 keyring decrypt won't exist there.
+
 ## Layout & env
 
 ```
