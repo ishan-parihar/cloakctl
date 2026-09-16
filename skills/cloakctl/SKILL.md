@@ -11,7 +11,8 @@ description: >
   with --endpoint, or anything "using the cloakctl infra". Even if the user
   doesn't name cloakctl, use it when the task is persistent-browser
   automation on this machine.
-author: ishan-parihar
+metadata:
+  author: ishan-parihar
 ---
 
 # cloakctl
