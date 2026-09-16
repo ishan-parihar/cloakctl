@@ -8,6 +8,7 @@ from typing import Any
 
 from . import snap, tabs as tabs_mod
 from .cdp import CdpClient, CdpError
+from .locks import read_lock as _read_lock
 
 _MD_WALKER = """(() => {
   const out = [];
@@ -333,14 +334,42 @@ def do_pdf(name: str, tab: str | None, landscape: bool, background: bool,
     return {"profile": name, "tab": tid[:8], "path": str(path), "bytes": len(raw)}
 
 
+def _is_remote(name: str) -> bool:
+    info = _read_lock(name)
+    return bool(info and info.remote)
+
+
 def do_download(name: str, tab: str | None, ref: str, out_dir: str,
                 timeout: float = 30.0) -> dict[str, Any]:
+    remote = _is_remote(name)
     dest = Path(out_dir)
-    dest.mkdir(parents=True, exist_ok=True)
+    if not remote:
+        dest.mkdir(parents=True, exist_ok=True)
     cdp, tid = _page_client(name, tab)
     with cdp:
-        cdp.allow_downloads(str(dest))
-        before = {p.name for p in dest.iterdir()}
+        before: set[str] = set()
+        completed: dict[str, str] = {}
+        dl_dir = out_dir
+        if remote:
+            # Browser-side files are invisible here: confirm completion via
+            # downloadProgress events, not the local fs. downloadPath is
+            # mandatory and browser-side; out_dir usually doesn't exist
+            # there, so fall back to the host /tmp (documented).
+            cdp.on_event("Browser.downloadProgress",
+                         lambda p: completed.update(
+                             {p.get("guid", ""): p.get("state", "")}))
+            try:
+                cdp.call("Browser.setDownloadBehavior",
+                         {"behavior": "allow", "downloadPath": out_dir,
+                          "eventsEnabled": True})
+            except CdpError:
+                dl_dir = "/tmp"
+                cdp.call("Browser.setDownloadBehavior",
+                         {"behavior": "allow", "downloadPath": "/tmp",
+                          "eventsEnabled": True})
+        else:
+            cdp.allow_downloads(str(dest))
+            before = {p.name for p in dest.iterdir()}
         backend = _backend(name, tab, ref, cdp, tid)
         try:
             cx, cy = cdp.box_center(backend)
@@ -349,6 +378,22 @@ def do_download(name: str, tab: str | None, ref: str, out_dir: str,
             cdp.call_on(cdp.resolve_object(backend), "function(){ this.click(); }")
         deadline = time.monotonic() + timeout
         while True:
+            if remote:
+                try:
+                    cdp.call("Browser.getVersion")  # pump: dispatch events
+                except CdpError:
+                    pass
+                guids = [g for g, s in completed.items() if s == "completed"]
+                if guids:
+                    return {"profile": name, "tab": tid[:8], "remote": True,
+                            "guid": guids[0], "dir": dl_dir,
+                            "note": "remote browser: file landed browser-side "
+                                    f"under {dl_dir}"}
+                if time.monotonic() >= deadline:
+                    raise CdpError(
+                        f"download: timeout after {timeout}s (remote)")
+                time.sleep(0.5)
+                continue
             after = {p.name for p in dest.iterdir()}
             new = [dest / n for n in (after - before)
                    if not n.endswith((".crdownload", ".part", ".download"))]
@@ -379,9 +424,12 @@ def object_for_selector(cdp, selector: str) -> str:
 
 def do_upload(name: str, tab: str | None, ref: str | None, files: list[str],
               selector: str | None = None) -> dict[str, Any]:
+    remote = _is_remote(name)
     for f in files:
         if not Path(f).is_file():
-            raise CdpError(f"upload: not a file: {f}")
+            hint = (" (remote profile: stage the file on the BROWSER host "
+                    "first — paths resolve browser-side)" if remote else "")
+            raise CdpError(f"upload: not a file: {f}{hint}")
     if not ref and not selector:
         raise CdpError("upload: need --ref or --selector")
     cdp, tid = _page_client(name, tab)
@@ -393,8 +441,18 @@ def do_upload(name: str, tab: str | None, ref: str | None, files: list[str],
             assert ref is not None
             obj = cdp.resolve_object(_backend(name, tab, ref, cdp, tid))
             via = ref
-        cdp.set_input_files(obj, [str(Path(f).resolve()) for f in files])
-    return {"profile": name, "tab": tid[:8], "uploaded": via, "files": files}
+        try:
+            cdp.set_input_files(obj, [str(Path(f).resolve()) for f in files])
+        except CdpError as e:
+            if remote:
+                raise CdpError(f"{e} (remote profile: paths resolve on the "
+                               f"BROWSER host, not this machine)")
+            raise
+    doc: dict[str, Any] = {"profile": name, "tab": tid[:8],
+                           "uploaded": via, "files": files}
+    if remote:
+        doc["remote"] = True
+    return doc
 
 
 def do_run(name: str, tab: str | None, code: str, timeout: float = 30.0) -> dict[str, Any]:

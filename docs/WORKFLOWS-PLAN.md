@@ -152,6 +152,19 @@ slow CDP round-trips; browser-binary home search cached.
 20/20 log storm, 3-way --new-tab isolation, replay timeout, restart
 healing) + unit 58/58 + full regression green.
 
+### S9 — Remote-endpoint mode (done 2026-09-16)
+VPS-side CLI, browser on another host: `open --endpoint wss://…`
+(`CLOAKCTL_CDP_URL` fallback) attaches without launching — no Popen, no
+signals, no DevToolsActivePort; reachability (WS handshake + round-trip)
+is liveness. `close` detaches. Status reports `remote: true` (version via
+`Browser.getVersion`, jar fingerprint over WS); doctor reports `rssMB:
+null` for remote (never a pid-0 machine sum). File honesty: screenshot/pdf
+bytes travel over the socket; download confirms via downloadProgress events
+and lands browser-side (`dir` + `guid`); upload paths must exist
+browser-side (errors say so). Import where the browser lives; Access on
+the tunnel. VPS footprint: idle Python, ~0 persistent RAM.
+**Accept:** tests/live_matrix8.py 12/12 two-HOME red-team green.
+
 ## 5. Non-goals (explicit)
 
 No cron/scheduler in cloakctl · no DAG/branching primitives in the registry (it's

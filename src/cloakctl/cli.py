@@ -54,14 +54,22 @@ def cmd_profiles(args) -> int:
 
 
 def cmd_open(args) -> int:
-    res = browser.open_profile(args.profile, headed=args.headed, extra_args=args.browser_arg)
+    res = browser.open_profile(args.profile, headed=args.headed,
+                               extra_args=args.browser_arg,
+                               endpoint=args.endpoint)
     _emit(res, args.json_)
     return 0
 
 
 def cmd_close(args) -> int:
+    from .locks import read_lock as _read_lock
+    info = _read_lock(args.profile)
+    detached = bool(info and info.remote)
     closed = browser.close_profile(args.profile)
-    _emit({"profile": args.profile, "closed": closed}, args.json_)
+    doc = {"profile": args.profile, "closed": closed}
+    if detached:
+        doc["detached"] = True  # remote browser keeps running on its host
+    _emit(doc, args.json_)
     return 0
 
 
@@ -377,6 +385,9 @@ def build_parser() -> argparse.ArgumentParser:
     po.add_argument("profile")
     po.add_argument("--headed", action="store_true")
     po.add_argument("--browser-arg", action="append", default=[])
+    po.add_argument("--endpoint", default=None,
+                    help="remote CDP ws endpoint (VPS-side CLI, browser elsewhere; "
+                    "falls back to CLOAKCTL_CDP_URL). No launch, no signals.")
     po.set_defaults(func=cmd_open)
 
     pcl = sub.add_parser("close", help="gracefully close the profile browser", parents=[_JSON_PARENT])

@@ -1,6 +1,6 @@
 [project]
 name = "cloakctl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lean cloakbrowser CLI for AI agents: one persistent stealth browser per profile, first-class active-browser session import."
 readme = "README.md"
 license = { text = "MIT" }

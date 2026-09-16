@@ -2,7 +2,7 @@
 
 **One persistent stealth browser per profile, driven entirely by CLI verbs over `--json` — plus a registry where AI agents save, compose, and compound reusable automations.**
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.1.0-informational) ![Tests](https://img.shields.io/badge/tests-304_passing-success)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Version](https://img.shields.io/badge/version-0.2.0-informational) ![Tests](https://img.shields.io/badge/tests-304_passing-success)
 
 Cookie injection across contexts is the burn vector, so sessions on one profile must be serialized: the jar lives in the browser, import writes into the *running* browser via CDP, and `open` is single-writer by construction. Agents get verbs, not REST. Plan: [`docs/PLAN.md`](./docs/PLAN.md) · workflows: [`docs/WORKFLOWS-PLAN.md`](./docs/WORKFLOWS-PLAN.md) · the one distinction: [`docs/SKILLS-VS-WF.md`](./docs/SKILLS-VS-WF.md).
 
@@ -15,9 +15,28 @@ git clone https://github.com/ishan-parihar/cloakctl && cd cloakctl
 ./install.sh            # pipx when present, else an isolated venv
 cloakctl doctor         # tolerates a missing browser; install one next
 cloakctl profiles create linkedin && cloakctl open linkedin
-cloakctl import linkedin brave --domain linkedin.com -y
-cloakctl validate linkedin   # logged_in | anonymous | challenged | burn_signature
+cloakctl import linkedin brave --domain linkedin.com -y && cloakctl validate linkedin
 ```
+
+## Remote browser (VPS-side CLI, browser on another host)
+
+The CLI needs no browser where it runs — `open --endpoint` attaches over a
+tunnel instead of launching. The VPS side holds only refs/meta (idle Python,
+~0 persistent RAM); the ~1.1 GB browser lives where it belongs.
+
+```bash
+# browser host: open normally, publish wsEndpoint via your tunnel (Access on)
+# VPS: every verb works over the endpoint; close detaches, never kills
+cloakctl open linkedin --endpoint wss://cdp.example.com/s/...   # or CLOAKCTL_CDP_URL
+cloakctl validate linkedin && cloakctl wf run scrape_list --profile linkedin --new-tab --set url=https://example.com --set selector=a
+cloakctl close linkedin        # {closed: true, detached: true}
+```
+
+File honesty across hosts: `screenshot`/`pdf` bytes travel over the socket
+(saved VPS-side); `download` lands browser-side (returned `dir` + `guid`);
+`upload` paths must exist on the browser host. Do the cookie `import`
+where the browser lives; put Cloudflare Access on the tunnel (raw CDP is
+full browser control).
 
 ## Proof (real transcript)
 
@@ -49,11 +68,10 @@ Write a **skill** for reusable context ("this site paginates with a More button"
 ## Compounding without filesystem access
 
 ```bash
-cloakctl wf save paginate_collect --code '...' --inputs '{...}'  # heredoc/string, no files
-cloakctl wf show paginate_collect --source     # read back, re-save to iterate (history kept)
-cloakctl wf run paginate_collect --profile p --set url=https://... --timeout 60
-cloakctl wf runs paginate_collect              # errors, durations, sub-call depth
-cloakctl wf runs paginate_collect --output 2026-09-16T12  # spilled large outputs
+cloakctl wf save pc --code '...' --inputs '{...}'  # string in, no files
+cloakctl wf show pc --source     # read back, re-save to iterate (history kept)
+cloakctl wf run pc --profile p --set url=https://... --timeout 60
+cloakctl wf runs pc [--output 2026-09-16T12]  # errors, durations, spilled outputs
 cloakctl wf rename a b | prune a --keep 20 | rm a   # builtins refuse rm
 ```
 
@@ -67,41 +85,33 @@ cloakctl wf rename a b | prune a --keep 20 | rm a   # builtins refuse rm
 ## Debugging natively
 
 ```bash
-cloakctl audit <profile> [--limit 20]   # command trail, names only, secret-safe
-cloakctl wf runs <name> [--output <stamp-prefix>]  # history + spilled evidence
-cloakctl skill show <name>              # run history + staleness
-cloakctl doctor                         # binary, locks, disk, memory, save/promote hints
+cloakctl audit <profile> [--limit 20]   # trail, names only, secret-safe
+cloakctl wf runs <name> [--output <stamp>]  # history + spilled evidence
+cloakctl skill show <name> | doctor     # staleness + binary/locks/hints
 ```
 
 ## Commands
 
 ```
 cloakctl profiles list|create <name>|rm <name> [--force]
-cloakctl open <profile> [--headed] [--browser-arg <arg>]... | close <profile>
+cloakctl open <profile> [--headed] [--browser-arg <arg>]... [--endpoint <ws>] | close <profile>
 cloakctl status [<profile>] | attach <profile> | doctor
 cloakctl import <profile> brave [--domain d]... [--dry-run] [-y]
 cloakctl validate <profile> [--url <probe>] | exec <profile> "<js>" [--tab <id>]
-cloakctl navigate <profile> --url <u> | --back | --forward | --reload [--tab <id>]
-cloakctl snapshot <profile> [--tab <id>] [--depth N] [--mode ax|text] | diff <profile>
-cloakctl act <profile> click|type|clear|focus --ref e3 [--text t] [--button left] [--count N]
-cloakctl act <profile> key --key Enter | hover --ref e3 | scroll [--dy 500]
-cloakctl act <profile> select --ref e5 --value b | fill --ref e1 --text v | fill --field e1=a
-cloakctl act <profile> check|uncheck --ref e2 | drag --ref e3 --dx 100 --dy 0
-cloakctl wait <profile> --text <s> | --selector <css> [--timeout 15] [--tab <id>]
-cloakctl read <profile> [--tab <id>] [--format markdown|text|links|console] [--selector <css>]
-cloakctl grep <profile> <pattern> [--over ax|text] [--limit 30]
-cloakctl screenshot <profile> [--full] [--format png] [--out path] [--tab <id>]
-cloakctl pdf <profile> [--landscape] [--out path] [--tab <id>]
+cloakctl navigate <profile> --url <u> | --back | snapshot <profile> [--tab <id>] | diff
+cloakctl act <profile> click|type|clear|focus|key|hover --ref e3 [--text t] [--key Enter]
+cloakctl act <profile> scroll|select|fill|check|uncheck|drag --ref e3 [--field e1=a] [--dx 100]
+cloakctl wait <profile> --text <s> | --selector <css> | read [--format markdown] [--selector <css>]
+cloakctl grep <profile> <pattern> [--over ax|text] | run <profile> "await fetch(...)"
+cloakctl screenshot <profile> [--full] [--format png] [--out path] | pdf <profile> [--out path]
 cloakctl download <profile> --ref e3 --out-dir <dir> | upload <profile> --ref e4 --file <f>...
 cloakctl run <profile> "await fetch(...)" [--timeout 30]
-cloakctl tabs <profile> list | new [--url <u>] [--background] | close <id>|active | activate <id>
-cloakctl windows <profile> list | activate <w> | close <w>
-cloakctl groups <profile> list | group <label> <id>... | ungroup <id>... | rename <old> <new>
-cloakctl history <profile> [--limit 20] [--query <q>] | audit <profile>
-cloakctl session <profile> <label> [--summary <s>] [--category <c>]
-cloakctl skill save <name> --description <d> --steps '[{"cmd":[...]}]' [--site <s>] [--notes <n>]
+cloakctl tabs <profile> list | new [--url <u>] | close <id>|active | activate <id>
+cloakctl windows <profile> list | close <w> | groups <profile> list | group <label> <id>...
+cloakctl history <profile> [--query <q>] | audit <profile> | session <profile> <label>
+cloakctl skill save <name> --description <d> --steps '[{"cmd":[...]}]'
 cloakctl skill list | show <name> | search <text> | promote <skill> [--to <wf>]
-cloakctl skill run <name> [--timeout 60] | rm <name> | rename <old> <new> | log-run <name>
+cloakctl skill run <name> [--timeout 60] | rm <name> | rename <old> <new>
 cloakctl wf list | show <name> [--source] | search <text> | export <name> [--out file]
 cloakctl wf save <name> --file mod.py | --code '...' | --file - [--inputs '{...}'] [--depends a,b]
 cloakctl wf run <name> --profile <p> [--input '{...}'] [--set k=v]... [--timeout 60] [--new-tab]
@@ -112,15 +122,12 @@ Page text ships in `[UNTRUSTED_PAGE_CONTENT nonce=...]` markers (data, not instr
 
 ## Guarantees
 
-- **Single writer**: `open` re-attaches, never launches twice (pid + start-time locks); `doctor` flags stale locks.
-- **No cookie egress**: read-only extraction (WAL-aware copy, temp-dir decrypt); same-context import refuses cold profiles.
-- **Detached browser** (setsid); `close` is SIGTERM → SIGKILL with cookie flush + orphan sweep.
-- **JSON-always**: every failure is a JSON error + nonzero exit.
+- **Single writer** (pid + start-time locks; `doctor` flags stale) · **no cookie egress** (read-only extract, same-context import)
+- **Detached browser** (setsid; SIGTERM → SIGKILL + orphan sweep) · **JSON-always** (failures are JSON + nonzero exit)
 
 ## Resource utilization (measured 2026-09-16, `tests/live_load.py`)
 
-Whole browser process tree as the OOM killer sees it (headless Chromium on
-this box; varies by build/flags). Zero strays after every suite.
+Whole process tree as the OOM killer sees it (varies by build/flags).
 
 | probe | latency | memory |
 |---|---|---|
@@ -131,22 +138,15 @@ this box; varies by build/flags). Zero strays after every suite.
 | 4 parallel `wf run --new-tab` (4/4 ok) | ~1s wall | peak ≈ steady |
 | disk per fresh profile | — | ~5 MB |
 
-VPS sizing: budget **~1.2 GB RAM per live profile** plus headroom — a 2 GB
-box fits 1 profile comfortably, 4 GB fits 2–3, 8 GB fits 6. The CLI itself
-is idle Python (no daemons); `CLOAKCTL_MIN_MEM_MB` refuses launches below
-400 MB free. cloakctl is a **system install** (launches the local Chromium
-binary directly — no Docker); in a container add `--browser-arg=--no-sandbox`
-and note v20 keyring decrypt won't exist there.
+Budget **~1.2 GB RAM per live profile**: 2 GB → 1 profile, 4 GB → 2–3, 8 GB → 6.
+The CLI is idle Python (no daemons). **System install** (local Chromium, no
+Docker); containers add `--browser-arg=--no-sandbox`, lose v20 keyring decrypt.
 
 ## Layout & env
 
 ```
-~/.cloakctl/
-  profiles/<name>/chrome/     the session itself (persistent user-data-dir)
-  profiles/<name>/meta.json   created/lastUsed/importHistory (fingerprints only)
-  skills/<name>.json          skill docs (history capped at 200)
-  workflows/<name>/           module.py + manifest.json (+ runs/<stamp>/ spill)
-  runtime/                    lock.<name>.json · audit.<name>.jsonl (rotating) · refs.<name>.<tab>.*
+~/.cloakctl/ profiles/<name>/{chrome/,meta.json} · skills/<name>.json
+  workflows/<name>/{module.py,manifest.json} · runtime/{lock,audit,refs}.*
 ```
 
 | Env | Purpose | Default |
@@ -160,7 +160,7 @@ and note v20 keyring decrypt won't exist there.
 
 ```bash
 python -m pytest tests/test_core.py tests/test_wf_prod.py   # 58 unit, no browser
-for t in live_matrix live_matrix2 live_matrix3 live_matrix4 live_matrix5 live_matrix6 live_matrix7 live_auto; do python tests/$t.py; done
+for t in live_matrix live_matrix2 live_matrix3 live_matrix4 live_matrix5 live_matrix6 live_matrix7 live_matrix8 live_auto live_load; do python tests/$t.py; done
 ```
 
-Every live suite uses an isolated temp `CLOAKCTL_HOME`, asserts zero strays at teardown, and passes `env=ENV` to every subprocess. PRs: keep the suite green, keep failures JSON. License: [MIT](./LICENSE).
+Isolated temp `CLOAKCTL_HOME` per suite, zero strays asserted, `env=ENV` everywhere. PRs: green suite, JSON failures. License: [MIT](./LICENSE).

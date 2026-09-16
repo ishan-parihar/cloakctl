@@ -239,8 +239,17 @@ def _sweep_profile_procs(name: str) -> int:
     return killed
 
 
-def open_profile(name: str, *, headed: bool = False, extra_args: list[str] | None = None) -> dict:
-    """Launch or re-attach. Idempotent: a live profile is never launched twice."""
+def open_profile(name: str, *, headed: bool = False,
+                 extra_args: list[str] | None = None,
+                 endpoint: str | None = None) -> dict:
+    """Launch or re-attach. Idempotent: a live profile is never launched twice.
+
+    `endpoint` (or CLOAKCTL_CDP_URL) attaches a browser that lives on
+    ANOTHER host (VPS-side CLI, local browser over a tunnel): no launch,
+    no signals, no DevToolsActivePort — reachability is liveness."""
+    endpoint = endpoint or os.environ.get("CLOAKCTL_CDP_URL")
+    if endpoint:
+        return _open_remote(name, endpoint)
     paths.ensure_layout()
     existing_pre = read_lock(name)
     if not (existing_pre and is_live(existing_pre)):
@@ -269,10 +278,10 @@ def open_profile(name: str, *, headed: bool = False, extra_args: list[str] | Non
         _sweep_profile_procs(name)  # reap orphaned renderers from the crash
 
     pid, port, ws = _launch(name, headed=headed, extra_args=extra_args or [])
-    from . import locks
+    from . import locks as _locks
 
     try:
-        locks.acquire(name, pid=pid, cdp_port=port, ws_endpoint=ws)
+        _locks.acquire(name, pid=pid, cdp_port=port, ws_endpoint=ws)
     except ProfileInUseError:
         # Raced with another launcher: ours lost; kill our whole tree
         # (kill(pid) alone would orphan our renderers), report theirs.
@@ -282,9 +291,56 @@ def open_profile(name: str, *, headed: bool = False, extra_args: list[str] | Non
     return {"profile": name, "pid": pid, "cdpPort": port, "wsEndpoint": ws, "reattached": False}
 
 
+def _open_remote(name: str, endpoint: str) -> dict:
+    """Attach-only open against a remote CDP endpoint (tunnel)."""
+    from urllib.parse import urlparse
+
+    from . import locks as _locks
+
+    paths.ensure_layout()
+    if not paths.profile_dir(name).exists():
+        paths.profile_dir(name).mkdir(parents=True, exist_ok=True)
+    existing = read_lock(name)
+    if existing and is_live(existing):
+        return {"profile": name, "pid": existing.pid,
+                "cdpPort": existing.cdp_port,
+                "wsEndpoint": existing.ws_endpoint,
+                "reattached": True, "remote": existing.remote}
+    host = (urlparse(endpoint).hostname or "")
+    if urlparse(endpoint).scheme == "ws" and host not in (
+            "localhost", "127.0.0.1", "::1"):
+        print(f"warning: remote endpoint {endpoint!r} is unencrypted ws://; "
+              f"serve it over wss:// (e.g. Cloudflare Access)",
+              file=sys.stderr)
+    try:
+        with CdpClient(endpoint, timeout=10) as cdp:
+            ver = cdp.call("Browser.getVersion")
+    except Exception as exc:
+        raise RuntimeError(f"remote endpoint unreachable: {exc}")
+    try:
+        _locks.acquire(name, pid=0, cdp_port=0, ws_endpoint=endpoint,
+                       remote=True)
+    except ProfileInUseError:
+        existing = read_lock(name)  # raced a parallel attach; theirs wins
+        return {"profile": name, "pid": existing.pid if existing else 0,
+                "cdpPort": existing.cdp_port if existing else 0,
+                "wsEndpoint": existing.ws_endpoint if existing else endpoint,
+                "reattached": True, "remote": True}
+    paths.touch_last_used(name)
+    return {"profile": name, "pid": 0, "cdpPort": 0,
+            "wsEndpoint": endpoint, "reattached": False, "remote": True,
+            "browser": ver.get("product")}
+
+
 def close_profile(name: str, *, timeout: float = 15.0) -> bool:
-    """Graceful close: SIGTERM the process group, then SIGKILL. Flushes cookies."""
+    """Graceful close: SIGTERM the process group, then SIGKILL. Flushes cookies.
+
+    Remote profiles detach (the browser outlives us on its own host)."""
     info = read_lock(name)
+    if info is not None and info.remote:
+        release_lock(name)  # detach only: no signals across hosts
+        paths.touch_last_used(name)
+        return True
     if info is None:
         _sweep_profile_procs(name)  # lockless orphans (crashed runs)
         return False
@@ -359,16 +415,26 @@ def status_profile(name: str) -> dict:
     out["created"] = meta.get("created")
     out["lastUsed"] = meta.get("lastUsed")
     if live and info is not None:
-        out["pid"] = info.pid
-        out["cdpPort"] = info.cdp_port
+        out["remote"] = bool(info.remote)
         out["wsEndpoint"] = info.ws_endpoint
+        if not info.remote:
+            out["pid"] = info.pid
+            out["cdpPort"] = info.cdp_port
+            try:
+                version = http_json(f"http://127.0.0.1:{info.cdp_port}/json/version", timeout=3)
+                out["browser"] = version.get("Browser")
+            except Exception:
+                out["browser"] = None
+        else:
+            try:
+                with CdpClient(info.ws_endpoint, timeout=10) as cdp:
+                    ver = cdp.call("Browser.getVersion")
+                out["browser"] = ver.get("product")
+            except Exception:
+                out["browser"] = None
         try:
-            version = http_json(f"http://127.0.0.1:{info.cdp_port}/json/version", timeout=3)
-            out["browser"] = version.get("Browser")
-        except Exception:
-            out["browser"] = None
-        try:
-            with CdpClient(info.ws_endpoint or f"ws://127.0.0.1:{info.cdp_port}/devtools/browser") as cdp:
+            endpoint = info.ws_endpoint or f"ws://127.0.0.1:{info.cdp_port}/devtools/browser"
+            with CdpClient(endpoint) as cdp:
                 jar = cdp.get_cookies()
             out["cookieCount"] = len(jar)
             out["jarFingerprint"] = jar_fingerprint(jar)
@@ -416,8 +482,13 @@ def doctor() -> dict:
             continue
         info = read_lock(d.name)
         if info and is_live(info):
+            # Remote browsers have no local pid: rss would walk pid 0 and
+            # sum half the machine. Report None, never a bogus number.
+            rss = (None if (info.remote or info.pid <= 0) else
+                   round(_rss_tree_mb(info.pid), 1))
             mem_profiles.append({"profile": d.name, "pid": info.pid,
-                                 "rssMB": round(_rss_tree_mb(info.pid), 1)})
+                                 "rssMB": rss,
+                                 "remote": bool(info.remote)})
     return {
         "browserBinary": binary,
         "binaryError": binary_error,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
+from .util import atomic_write_json
 
 
 class ProfileInUseError(RuntimeError):
@@ -31,6 +32,7 @@ class LockInfo:
     started_at: float  # /proc/<pid>/stat field 22 (jiffies since boot)
     cdp_port: int
     ws_endpoint: str | None = None
+    remote: bool = False  # browser lives elsewhere; lock is attach-only
 
 
 def _proc_start_time(pid: int) -> float:
@@ -54,6 +56,7 @@ def read_lock(name: str) -> LockInfo | None:
             started_at=float(raw.get("startedAt", -1.0)),
             cdp_port=int(raw["cdpPort"]),
             ws_endpoint=raw.get("wsEndpoint"),
+            remote=bool(raw.get("remote", False)),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -61,6 +64,8 @@ def read_lock(name: str) -> LockInfo | None:
 
 def is_live(info: LockInfo) -> bool:
     """True when the locked pid exists AND its start time matches the record."""
+    if info.remote:
+        return remote_reachable(info.ws_endpoint)
     if info.pid <= 0:
         return False
     try:
@@ -74,22 +79,36 @@ def is_live(info: LockInfo) -> bool:
     return _proc_start_time(info.pid) == info.started_at
 
 
-def acquire(name: str, pid: int, cdp_port: int, ws_endpoint: str | None) -> None:
+def remote_reachable(ws_endpoint: str | None, timeout: float = 5.0) -> bool:
+    """Liveness for remote browsers: a WS handshake + one round-trip.
+
+    No pid exists to check across hosts, so reachability IS liveness.
+    Short timeout — this runs inside status checks on every verb."""
+    if not ws_endpoint:
+        return False
+    try:
+        from .cdp import CdpClient
+
+        with CdpClient(ws_endpoint, timeout=timeout) as cdp:
+            cdp.list_targets()
+        return True
+    except Exception:
+        return False
+
+
+def acquire(name: str, pid: int, cdp_port: int, ws_endpoint: str | None,
+            remote: bool = False) -> None:
     """Write the lock. Raises ProfileInUseError if a live lock already exists."""
     existing = read_lock(name)
     if existing and is_live(existing):
         raise ProfileInUseError(name, existing)
     paths.ensure_layout()
-    paths.lock_path(name).write_text(
-        json.dumps(
-            {
-                "pid": pid,
-                "startedAt": _proc_start_time(pid),
-                "cdpPort": cdp_port,
-                "wsEndpoint": ws_endpoint,
-            }
-        )
-    )
+    atomic_write_json(paths.lock_path(name),
+                        {"pid": pid,
+                         "startedAt": _proc_start_time(pid) if not remote else 0.0,
+                         "cdpPort": cdp_port,
+                         "wsEndpoint": ws_endpoint,
+                         "remote": remote})
 
 
 def release(name: str, *, expect_pid: int | None = None) -> bool:
