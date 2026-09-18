@@ -2,7 +2,7 @@
 
 **One persistent stealth browser per profile, driven by CLI verbs over `--json` — with a registry where AI agents save, compose, and compound reusable automations.**
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.3.0-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-83%20unit%20%2B%2029%20%2B%2014%20live-success)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.4.0-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-94%20unit%20%2B%2055%20live-success)
 
 Sessions on one profile must be serialized: cookie injection across contexts is the burn vector, the jar lives in the browser, and `open` is single-writer by construction. Agents get verbs, not REST — every failure is a JSON document with a nonzero exit, never a traceback.
 

@@ -120,7 +120,8 @@ def _get_engine() -> str:
     return eng if eng in ("obscura", "cloakbrowser") else _DEFAULT_ENGINE
 
 
-def _run_cloakctl(args: list[str], timeout: float = 30) -> Dict[str, Any]:
+def _run_cloakctl(args: list[str], timeout: float = 30,
+                  extra_env: Dict[str, str] | None = None) -> Dict[str, Any]:
     """Run cloakctl and return parsed JSON output (--json machine contract).
 
     Raises RuntimeError on non-zero exit with the CLI's error text.
@@ -139,7 +140,11 @@ def _run_cloakctl(args: list[str], timeout: float = 30) -> Dict[str, Any]:
     else:
         cmd = [bin_cmd, "--json", *args]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    env = None
+    if extra_env:
+        env = {**os.environ, **extra_env}
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                            env=env)
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
         raise RuntimeError(f"cloakctl {' '.join(args)} failed: {err}")
@@ -214,7 +219,13 @@ class CloakctlBrowserProvider(BrowserProvider):
             open_args += ["--browser-arg=--allow-private-network"]
         else:
             open_args += ["--engine", "cloakbrowser"]
-        data = _run_cloakctl(open_args, timeout=120)
+        # Hermes has explicitly chosen cloakctl as its browser backend, on
+        # hosts that are often small VPS boxes: relax the launch RAM floor
+        # (obscura idles ~60MB; the default 400MB floor rejects healthy
+        # launches on 1-2GB machines). Operators can still raise it via
+        # CLOAKCTL_MIN_MEM_MB in hermes' environment.
+        open_env = {"CLOAKCTL_MIN_MEM_MB": "150"}
+        data = _run_cloakctl(open_args, timeout=120, extra_env=open_env)
 
         got_engine = data.get("engine")
         pid = data.get("pid")
