@@ -167,25 +167,54 @@ if [ -d "$HOME/.hermes/hermes-agent/plugins/browser" ]; then
   echo "hermes: plugin synced to $DEST (browser.cloud_provider: cloakctl)"
   # Wire the MCP server into hermes config.yaml (idempotent). `hermes mcp
   # add` is interactive, so the stanza is written directly — hermes
-  # auto-reloads the mcp_servers section on startup.
+  # auto-reloads the mcp_servers section on startup. The env override
+  # lowers cloakctl's launch RAM floor: hermes' MCP-spawned `open` must
+  # succeed on small VPS boxes (obscura idles ~60MB; the 400MB default
+  # floor rejects healthy launches on 1-2GB machines). Hermes merges this
+  # env on top of its safe baseline (PATH/HOME), so binary discovery is
+  # unaffected. Operators can raise it in config.yaml.
   HERMES_CFG="$HOME/.hermes/config.yaml"
   if [ -f "$HERMES_CFG" ]; then
     if python3 - "$HERMES_CFG" "$BINMCP" <<'PYCFG'
 import sys
 path, mcpbin = sys.argv[1], sys.argv[2]
+ENV_KEY = "CLOAKCTL_MIN_MEM_MB"
+ENV_LINES = ["    env:\n", f'      {ENV_KEY}: "150"\n']
 lines = open(path).read().splitlines(keepends=True)
-# Already configured under mcp_servers? (any indent-2 cloakctl: key)
+
+def span(i):
+    """End index (exclusive) of the cloakctl entry starting at line i."""
+    j = i + 1
+    while j < len(lines):
+        s = lines[j].rstrip("\n")
+        if not s.strip():
+            j += 1
+            continue
+        if not s[0].isspace():
+            break
+        if s.startswith("  ") and not s.startswith("   "):
+            break
+        j += 1
+    return j
+
 in_mcp = False
-for ln in lines:
+for i, ln in enumerate(lines):
     if ln.rstrip("\n") == "mcp_servers:":
         in_mcp = True
         continue
     if in_mcp and ln and not ln[0].isspace():
         in_mcp = False
     if in_mcp and ln.rstrip("\n") == "  cloakctl:":
-        print("hermes: mcp_servers.cloakctl already configured")
+        j = span(i)
+        body = "".join(lines[i:j])
+        if ENV_KEY in body:
+            print("hermes: mcp_servers.cloakctl already configured")
+        else:
+            lines[j:j] = ENV_LINES
+            open(path, "w").write("".join(lines))
+            print("hermes: mcp_servers.cloakctl: added RAM floor env override")
         sys.exit(0)
-entry = [f"  cloakctl:\n", f"    command: {mcpbin}\n", "    connect_timeout: 20\n"]
+entry = ["  cloakctl:\n", f"    command: {mcpbin}\n", "    connect_timeout: 20\n", *ENV_LINES]
 for i, ln in enumerate(lines):
     if ln.rstrip("\n") == "mcp_servers:":
         lines[i+1:i+1] = entry
