@@ -2,7 +2,7 @@
 
 **One persistent stealth browser per profile, driven by CLI verbs over `--json` — with a registry where AI agents save, compose, and compound reusable automations.**
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.4.0-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-94%20unit%20%2B%2055%20live-success)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.4.1-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-94%20unit%20%2B%2054%20live-success)
 
 Sessions on one profile must be serialized: cookie injection across contexts is the burn vector, the jar lives in the browser, and `open` is single-writer by construction. Agents get verbs, not REST — every failure is a JSON document with a nonzero exit, never a traceback.
 
@@ -31,23 +31,20 @@ Opt out of the obscura download with `./install.sh --engine cloakbrowser` (needs
 
 ## MCP server
 
-The same operations are exposed as MCP tools over stdio — install gives you
-both binaries:
+The same operations as MCP tools over stdio — install gives you both binaries:
 
 ```json
 {"mcpServers": {"cloakctl": {"command": "cloakctl-mcp", "args": []}}}
 ```
 
-25 tools named `cloakctl_{verb}` (`cloakctl_open`, `cloakctl_snapshot`,
-`cloakctl_act`, `cloakctl_wf_run`, …). Core failures arrive as tool errors
+25 tools named `cloakctl_{verb}`. Core failures arrive as tool errors
 with an `error:` line plus a `help:` line naming the fixing command — agents
-self-correct without a retry ladder. The MCP server is the right default for
-harnesses that speak MCP; the CLI is right for shell loops and pipes.
+self-correct without a retry ladder. Right default for harnesses that speak
+MCP; the CLI for shell loops and pipes.
 
 ### Agent-harness integrations
 
-`install.sh` detects installed harnesses and wires cloakctl in (best-effort,
-never fatal). Manual setup for fresh installs:
+`install.sh` detects and wires installed harnesses (best-effort, never fatal). Manual setup:
 
 | Harness | Command |
 |---|---|
@@ -59,11 +56,11 @@ never fatal). Manual setup for fresh installs:
 
 The hermes plugin is the deep integration: it registers a local
 `BrowserProvider` (persistent per-profile browser, cookie persistence across
-agent turns) and `install.sh` also wires `cloakctl-mcp` into hermes'
-`mcp_servers` config. It runs on the **default obscura engine** — the
-keeper's CDP bridge serves hermes the profile's true session, so no Chromium
-or cloakbrowser dependency is needed (~65MB total vs 2GB+).
-All other harnesses consume the MCP server.
+agent turns) on the **default obscura engine** — the keeper's CDP bridge
+serves hermes the profile's true session, no Chromium needed (~65MB vs 2GB+).
+`install.sh` wires `cloakctl-mcp` into hermes' `mcp_servers` config with a
+low RAM floor (`CLOAKCTL_MIN_MEM_MB: 150`) for small VPS boxes. All other
+harnesses consume the MCP server.
 
 ## Quick start
 
@@ -76,8 +73,8 @@ cloakctl act linkedin click --ref e3
 cloakctl close linkedin
 ```
 
-Every verb works over `--json` for agents (`--toon` for token-efficient TOON
-output; bare `cloakctl` shows a live home view); humans can drop the flag.
+Every verb works over `--json` for agents (`--toon` for token-efficient
+output; bare `cloakctl` is a live home view); humans can drop the flag.
 
 ## The compounding loop
 
@@ -91,58 +88,31 @@ Skills carry the *how-to-think*; workflows carry the *how-to-do*.
 | Trust | untrusted guidance (may go `stale`) | operator-trusted code (same as shell) |
 
 ```bash
-# save, run, and iterate — no filesystem access needed
 cloakctl wf save title --code 'META = {"inputs": {"url": {"type": "str", "required": True}}}
 def run(ctx, inputs):
     ctx.navigate(inputs["url"])
     return {"title": ctx.exec("document.title")}'
 cloakctl wf run title --profile p --set url=https://example.com --timeout 60
-cloakctl wf runs title                     # history + spilled evidence
 ```
 
-Run against an **open** profile (`cloakctl open p` first — the single-writer lifecycle applies to workflows too).
-
-A reusable site trick → `skill save`. The doing itself compounds (`scrape_list` → `paginate_collect`) → `wf save --code`. Inputs declared `"secret": true` are redacted from every call tree and log.
+Run against an **open** profile. A reusable site trick → `skill save`; the doing itself compounds (`scrape_list` → `paginate_collect`) → `wf save --code`. Inputs declared `"secret": true` are redacted from every call tree and log.
 
 ## Commands
 
-```
-cloakctl profiles list|create <name>|rm <name> [--force]
-cloakctl open <profile> [--headed] [--engine obscura|cloakbrowser] [--stealth] [--browser-arg <arg>]... [--endpoint <ws>] | close <profile>
-cloakctl status [<profile>] | attach <profile> | doctor
-cloakctl import <profile> brave [--domain d]... [--dry-run] [-y] | validate <profile> [--url <probe>]
-cloakctl navigate <profile> --url <u> | --back | snapshot | diff | wait --text <s> | grep <pattern>
-cloakctl act <profile> click|type|fill|key|scroll|select|check|drag --ref e3 [--field e1=a]
-cloakctl read [--format markdown|text|links|console] | run "await fetch(...)" | exec "<js>"
-cloakctl screenshot [--full] | pdf | download --ref e3 --out-dir <dir> | upload --ref e4 --file <f>
-cloakctl tabs list|new|close|active | windows | groups | group <label> <id>...
-cloakctl history <profile> | audit <profile> | session <profile> <label>
-cloakctl skill save|list|show|search|promote|run|rm <name> ...
-cloakctl wf save|run|runs|show|export|rename|prune|rm <name> ...
-```
-
-Page text arrives wrapped in `[UNTRUSTED_PAGE_CONTENT nonce=...]` markers — data, not instructions. Cookie values are never printed.
+Full verb reference (25 verbs, each mirrored as an MCP tool): [docs/COMMANDS.md](./docs/COMMANDS.md).
 
 ## Remote mode (VPS-side CLI, browser elsewhere)
 
 ```bash
 cloakctl open linkedin --endpoint wss://cdp.example.com/s/...   # or CLOAKCTL_CDP_URL
-cloakctl validate linkedin && cloakctl wf run pc --profile linkedin --new-tab
-cloakctl close linkedin        # detaches; the browser keeps running on its host
+cloakctl validate linkedin && cloakctl wf run pc --profile linkedin --new-tab   # close detaches; browser stays
 ```
 
 The VPS holds only refs/meta (idle Python, ~0 persistent RAM). Do the cookie `import` where the browser lives; put Cloudflare Access on the tunnel — raw CDP is full browser control.
 
-> Remote mode is **cloakbrowser-only**: obscura's CDP is per-connection
-> isolated (a second connection sees an empty session), so the browser host
-> runs `open <p> --engine cloakbrowser` before tunneling. An empty endpoint
-> is refused outright — never a silent local launch.
+> **Obscura (default)**: a second *direct* connection sees an empty session (per-connection CDP), so external attach goes through the keeper's **bridge** — a loopback endpoint over the keeper's master connection that IS the profile's real session (same page, same cookies). `attach`/`status`/`open` report it; hermes, playwright, and any raw CDP client connect there. Loopback + per-keeper token; not a network service.
 >
-> **Local attach is different**: `cloakctl attach <obscura-profile>` serves
-> the keeper's CDP **bridge** — a loopback endpoint over the keeper's master
-> connection that IS the profile's real session (same page, same cookies).
-> External CDP clients (hermes/agent-browser `--cdp`, playwright) attach
-> there. Loopback + per-keeper token; not a network service.
+> **cloakbrowser (Chromium)**: native browser-level endpoint, shareable as-is for remote/tunneled setups. An empty `--endpoint` is refused outright — never a silent local launch.
 
 ## Resource profile
 
@@ -155,7 +125,7 @@ Measured 2026-09-18 (`tests/live_load.py`, `tests/live_obscura.py`), whole proce
 | 200 navigate+read cycles (obscura) | ~289 ms/cycle, no leak | 65 → 67 MB |
 | 4 live profiles (Chromium, worst case) | — | ~5.0 GB RSS |
 
-Budget with the default engine at **~100 MB per profile**; budget Chromium at **~1.2 GB per profile** (2 GB → 1, 4 GB → 2–3, 8 GB → 6). `CLOAKCTL_MIN_MEM_MB` refuses launches below 400 MB free.
+Budget **~100 MB per profile** (obscura) / **~1.2 GB** (Chromium: 2 GB → 1, 4 GB → 2–3, 8 GB → 6). `CLOAKCTL_MIN_MEM_MB` refuses launches below 400 MB free (hermes' plugin and MCP stanza tune it to 150 for small VPS boxes).
 
 ## Engine honesty (obscura)
 
@@ -188,11 +158,12 @@ State lives in `~/.cloakctl/profiles/<name>/` + `runtime/` — never edit it dir
 ## Contributing & tests
 
 ```bash
-python -m pytest tests/test_core.py tests/test_wf_prod.py tests/test_engines.py   # 75 unit, no browser
+python -m pytest tests/test_core.py tests/test_wf_prod.py tests/test_engines.py tests/test_mcp.py   # 94 unit, no browser
 python tests/live_obscura.py        # 29-check obscura matrix (local fixtures, no external network)
+python tests/live_bridge.py         # 12-check bridge proof: external CDP client == true session
 python tests/live_matrix8.py        # remote-endpoint matrix
 ```
 
 PRs: green suite, JSON failures, isolated temp `CLOAKCTL_HOME` per run. Doctrine deep-dives: [docs/SKILLS-VS-WF.md](./docs/SKILLS-VS-WF.md) · plans: [docs/PLAN.md](./docs/PLAN.md), [docs/WORKFLOWS-PLAN.md](./docs/WORKFLOWS-PLAN.md). License: [MIT](./LICENSE).
 
-<!-- tests: 78 unit + 29 obscura live + 14 remote live (matrix8) + 11 smoke -->
+<!-- tests: 94 unit + 29 obscura live + 12 bridge + 14 remote live (matrix8) + 11 smoke -->
