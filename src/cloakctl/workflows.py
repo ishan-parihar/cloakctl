@@ -531,6 +531,13 @@ def run_workflow(name: str, inputs: dict, profile: str,
                 _tabs2.close_tab(profile, owned_tab)
             except Exception:
                 pass
+            # The owned tab was recorded active at creation; leaving a
+            # dangling record makes the next `active`-binding verb pick an
+            # ARBITRARY page (navigate and snapshot would disagree).
+            try:
+                _tabs2.clear_active(profile, owned_tab)
+            except Exception:
+                pass
     dur = round((time.monotonic() - t0) * 1000)
     entry: dict[str, Any] = {"ts": now_iso(), "ok": ok, "durationMs": dur,
                              "steps": state.steps, "profile": profile}

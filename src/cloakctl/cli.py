@@ -56,7 +56,9 @@ def cmd_profiles(args) -> int:
 def cmd_open(args) -> int:
     res = browser.open_profile(args.profile, headed=args.headed,
                                extra_args=args.browser_arg,
-                               endpoint=args.endpoint)
+                               endpoint=args.endpoint,
+                               engine=getattr(args, "engine", None),
+                               stealth=getattr(args, "stealth", False))
     _emit(res, args.json_)
     return 0
 
@@ -85,6 +87,15 @@ def cmd_attach(args) -> int:
     st = browser.status_profile(args.profile)
     if not st.get("live"):
         raise RuntimeError(f"profile {args.profile!r} is not live; run `cloakctl open {args.profile}`")
+    if st.get("engine") == "obscura":
+        # obscura's CDP is per-connection isolated: there is no shareable
+        # ws endpoint. Say so instead of printing a null that remote attach
+        # would silently ignore.
+        raise RuntimeError(
+            "obscura profiles expose no attach endpoint (per-connection CDP "
+            "— a second connection sees an empty session). Remote mode is a "
+            "cloakbrowser feature: open the profile with "
+            "`--engine cloakbrowser` on the browser host, then attach.")
     _emit({"profile": args.profile, "wsEndpoint": st["wsEndpoint"], "cdpPort": st["cdpPort"]}, args.json_)
     return 0
 
@@ -111,28 +122,33 @@ def cmd_validate(args) -> int:
 
 
 def cmd_exec(args) -> int:
-    st = browser.status_profile(args.profile)
-    if not st.get("live"):
-        raise RuntimeError(f"profile {args.profile!r} is not live")
-    from .cdp import CdpClient
+    from .cdp import open_client
     from . import tabs as tabs_mod
 
-    with CdpClient(st["wsEndpoint"]) as cdp:
-        cdp.connect()
+    with open_client(args.profile) as cdp:
         # Evaluate in the visible page (active tab), not a fresh blank target.
         if getattr(args, "tab", None):
-            cdp.bind_target(tabs_mod._resolve_target(cdp, args.tab, args.profile))
+            tid = tabs_mod._resolve_target(cdp, args.tab, args.profile)
+            cdp.bind_target(tid)
         else:
             rec = tabs_mod.recorded_active(args.profile, cdp)
             if rec is not None:
+                tid = rec
                 cdp.bind_target(rec)
-                active = None
             else:
                 active = cdp.active_page_target()
-            if active is not None:
-                cdp.bind_target(tabs_mod.tid(active))
-            elif rec is None:
-                cdp.ensure_page_session()
+                if active is not None:
+                    tid = tabs_mod.tid(active)
+                    cdp.bind_target(tid)
+                else:
+                    cdp.ensure_page_session()
+                    tid = None
+        if tid:
+            # Record what we actually bound (same contract as page verbs).
+            try:
+                tabs_mod.record_active(args.profile, tid)
+            except Exception:
+                pass
         value = cdp.evaluate(args.js)
     _emit({"profile": args.profile, "value": value}, args.json_)
     return 0
@@ -384,7 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("open", help="launch or re-attach the profile browser", parents=[_JSON_PARENT])
     po.add_argument("profile")
     po.add_argument("--headed", action="store_true")
-    po.add_argument("--browser-arg", action="append", default=[])
+    po.add_argument("--browser-arg", action="append", default=[],
+                    help="extra engine flag (repeatable; e.g. --browser-arg=--allow-file-access)")
+    po.add_argument("--engine", default=None, choices=["obscura", "cloakbrowser"],
+                    help="browser engine (default: obscura; falls back to CLOAKCTL_ENGINE, "
+                    "profile meta, then auto-detect). cloakbrowser = Chromium-family binary.")
+    po.add_argument("--stealth", action="store_true",
+                    help="obscura only: anti-detection + tracker blocking")
     po.add_argument("--endpoint", default=None,
                     help="remote CDP ws endpoint (VPS-side CLI, browser elsewhere; "
                     "falls back to CLOAKCTL_CDP_URL). No launch, no signals.")

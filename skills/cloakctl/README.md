@@ -2,8 +2,10 @@
 
 Agent-facing skill for using and operationalizing the
 [cloakctl](https://github.com/ishan-parihar/cloakctl) system: one persistent
-stealth browser per profile over CLI verbs, plus a registry where agents
-compound reusable automations (skill macros vs typed `wf` modules).
+stealth browser per profile over CLI verbs — **obscura** engine by default
+(standalone ~60 MB stealth browser, no Chromium needed), Chromium
+(**cloakbrowser**) opt-in — plus a registry where agents compound reusable
+automations (skill macros vs typed `wf` modules).
 
 Install:
 
@@ -11,6 +13,9 @@ Install:
 npx skills add ishan-parihar/cloakctl
 # or: install this skill package into your agent's skills dir
 ```
+
+Remote (VPS) mode is Chromium-family only — obscura's per-connection CDP
+cannot be tunnel-shared; see SKILL.md § Remote mode.
 
 Layout: `SKILL.md` (doctrine + core loop) · `references/` (page actuation,
 workflows+skills, remote VPS, troubleshooting) · `scripts/smoke.sh`

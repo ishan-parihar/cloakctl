@@ -1,15 +1,23 @@
 """cloakctl live matrix8 — remote-endpoint mode (VPS-side CLI, browser elsewhere).
 
+Remote mode is a cloakbrowser (Chromium-family) feature: obscura's CDP is
+per-connection isolated, so a remote attach would see an empty session.
+The host browser is therefore launched with `--engine cloakbrowser`.
+
 Two-HOME simulation: HOME_A is the browser host (local launch), HOME_B is
 the VPS side (only `open --endpoint` / CLOAKCTL_CDP_URL, never a launch).
 Covers attach, env fallback, verbs, wf runs, detach semantics, dead-endpoint
-errors, browser-side download/upload honesty, doctor rss guard. Exit 0.
+errors, browser-side download/upload honesty, doctor rss guard — plus the
+obscura honesty contract: an empty --endpoint must never fall through to a
+local launch, and obscura's engine string is refused at `attach`.
+Exit 0.
 """
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _VENV_BIN = os.path.join(REPO, ".venv", "bin", "cloakctl")
@@ -45,9 +53,10 @@ def runB(*args, timeout=120, env=None):
         return p.returncode, {"_raw": (p.stdout + p.stderr)[:200]}
 
 
-# host side: launch the browser that the "VPS" will drive
+# host side: launch the browser that the "VPS" will drive.
+# cloakbrowser is REQUIRED for remote mode (obscura CDP is per-connection).
 runA("profiles", "create", "m8")
-rc, d = runA("open", "m8")
+rc, d = runA("open", "m8", "--engine", "cloakbrowser")
 WS = (d.get("wsEndpoint") or "")
 check("r0 host browser launched", rc == 0 and WS.startswith("ws://"),
       WS[:40])
@@ -99,6 +108,25 @@ rc, d = runB("open", "dead", "--endpoint", "ws://127.0.0.1:9/nope")
 check("r6 dead endpoint JSON error", rc == 1
       and "unreachable" in (d.get("error", "") + d.get("_raw", "")))
 
+# r6b: an EMPTY endpoint must never fall through to a local launch —
+# the VPS side asked for remote mode; silently launching a browser there
+# is exactly the bug class remote mode exists to prevent.
+rc, d = runB("open", "m8-empty", "--endpoint", "")
+rc2, d2 = runB("status", "m8-empty")
+check("r6b empty endpoint refuses local launch", rc == 1
+      and rc2 == 0 and d2.get("live") is False and d2.get("exists") is False,
+      f"rc={rc} live={d2.get('live')}")
+
+# r6c: obscura cannot be remote-attached honestly: attach refuses with a
+# pointer to cloakbrowser (the engine string is only reported for obscura
+# profiles; a cloakbrowser profile prints the ws endpoint instead).
+runA("profiles", "create", "m8ob")
+runA("open", "m8ob")
+rc, d = runA("attach", "m8ob")
+check("r6c attach refuses obscura", rc == 1
+      and "per-connection" in (d.get("error", "") + d.get("_raw", "")))
+runA("close", "m8ob")
+
 # r7: close detaches; host browser survives; VPS lock released
 rc, d = runB("close", "m8")
 rc2, d2 = runA("status", "m8")
@@ -120,8 +148,10 @@ for line in (snap.get("snapshot", "") or "").splitlines():
         ref = line.split("[ref=")[1].split("]")[0]
         break
 if ref:
+    # verb deadline (15s) MUST sit under the subprocess kill (25s) so a slow
+    # download surfaces as the verb's own JSON timeout, never a test kill.
     rc, d = runB("download", "m8", "--ref", ref, "--out-dir", "/tmp",
-                 timeout=25)
+                 "--timeout", "15", timeout=25)
     check("r8 remote download guid", rc == 0 and d.get("remote") is True
           and bool(d.get("guid")), f"{rc} {d}")
 else:
@@ -140,12 +170,18 @@ rc2, d2 = runB("exec", "m8", "1+1")
 check("r10 host death is clean JSON", rc == 0 and d.get("live") is False
       and rc2 == 1 and isinstance(d2.get("error", d2.get("_raw")), str))
 
-# teardown: zero strays on either side
+# teardown: zero strays belonging to THIS run's state dirs on either side
+# (other cloaktest8 matches may predate this run; only ours can be ours)
 runB("close", "m8b")
 runB("close", "m8")
-left = subprocess.run(["pgrep", "-af", "cloaktest8"], capture_output=True,
+time.sleep(1.5)
+left = subprocess.run(["pgrep", "-af", HOME_A], capture_output=True,
                       text=True).stdout.strip()
+left += subprocess.run(["pgrep", "-af", HOME_B], capture_output=True,
+                       text=True).stdout.strip()
 check("r11 teardown clean", left == "", left[:200])
 
 print(f"==== {len(PASS)}/{len(PASS) + len(FAIL)} PASS ====  (A={HOME_A} B={HOME_B})")
+runA("close", "m8")
+runA("close", "m8ob")
 sys.exit(0 if not FAIL else 1)

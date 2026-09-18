@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -35,30 +36,38 @@ _MD_WALKER = """(() => {
 
 
 def _page_client(name: str, tab: str | None = None) -> tuple[CdpClient, str]:
-    from . import browser as browser_mod
+    """Client bound to the profile's page session, whichever engine.
 
-    st = browser_mod.status_profile(name)
-    if not st.get("live"):
-        raise RuntimeError(f"profile {name!r} is not live; run `cloakctl open {name}` first")
-    cdp = CdpClient(st["wsEndpoint"])
-    cdp.connect()
+    obscura: keeper passthrough (the persistent page IS the session; tab
+    selection only scopes snapshot refs).
+    """
+    from .cdp import open_client
+
+    cdp = open_client(name)
     try:
-        if tab:
+        cdp.connect()  # no-op for keeper-bound; direct-WS clients need the loop up before target resolution
+        if tab and tab != "active":
             tid = tabs_mod._resolve_target(cdp, tab, name)
-            cdp.bind_target(tid)
-            return cdp, tid
-        rec = tabs_mod.recorded_active(name, cdp)
-        if rec:
-            cdp.bind_target(rec)
-            return cdp, rec
-        active = cdp.active_page_target()
-        if active is None:
-            cdp.ensure_page_session()
-            assert cdp._target_id is not None
-            return cdp, cdp._target_id
-        aid = tabs_mod.tid(active)
-        cdp.bind_target(aid)
-        return cdp, aid
+        else:
+            rec = tabs_mod.recorded_active(name, cdp)
+            if rec:
+                tid = rec
+            else:
+                active = cdp.active_page_target()
+                if active is not None:
+                    tid = tabs_mod.tid(active)
+                else:
+                    cdp.ensure_page_session()
+                    tid = cdp._target_id or "default"
+        cdp.bind_target(tid)
+        # Record what we ACTUALLY bound: the next verb's `active` alias
+        # must resolve to this page, not an arbitrary one (otherwise two
+        # verbs in a row can bind different pages and silently disagree).
+        try:
+            tabs_mod.record_active(name, tid)
+        except Exception:
+            pass
+        return cdp, tid
     except Exception:
         cdp.close()
         raise
@@ -70,7 +79,7 @@ def do_navigate(name: str, action: str, url: str | None, tab: str | None) -> dic
         res = cdp.navigate_action(action, url)
         final = cdp.evaluate("location.href") or (url or "")
         title = cdp.evaluate("document.title") or ""
-    return {"profile": name, "tab": tid[:8], "url": final, "title": title, **res}
+    return {"profile": name, "tab": str(tid)[:8], "url": final, "title": title, **res}
 
 
 def do_snapshot(name: str, tab: str | None, depth: int, mode: str) -> dict[str, Any]:
@@ -78,7 +87,7 @@ def do_snapshot(name: str, tab: str | None, depth: int, mode: str) -> dict[str, 
     with cdp:
         if mode == "text":
             text = cdp.evaluate("document.body ? document.body.innerText.slice(0,30000) : ''") or ""
-            return {"profile": name, "tab": tid[:8], "mode": "text",
+            return {"profile": name, "tab": str(tid)[:8], "mode": "text",
                     "snapshot": snap.trust_wrap(text, cdp.evaluate("location.href") or "")}
         res = snap.take_snapshot(cdp, name, tid, depth)
     res["profile"] = name
@@ -99,7 +108,7 @@ def do_diff(name: str, tab: str | None) -> dict[str, Any]:
     _paths.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     atomic_write_json(ref_path, {"url": url, "refs": refmap})
     atomic_write_text(txt_path, text)
-    return {"profile": name, "tab": tid[:8], "url": url, "changes": changes,
+    return {"profile": name, "tab": str(tid)[:8], "url": url, "changes": changes,
             "changeCount": len(changes.splitlines())}
 
 
@@ -132,15 +141,15 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
                 try:
                     cx, cy = cdp.box_center(backend)
                     cdp.mouse_click(cx, cy, button, count)
-                    return {"profile": name, "tab": tid[:8], "clicked": ref, "at": [round(cx), round(cy)]}
+                    return {"profile": name, "tab": str(tid)[:8], "clicked": ref, "at": [round(cx), round(cy)]}
                 except CdpError:
                     obj = cdp.resolve_object(backend)
                     cdp.call_on(obj, "function(){ this.click(); }")
-                    return {"profile": name, "tab": tid[:8], "clicked": ref, "via": "js"}
+                    return {"profile": name, "tab": str(tid)[:8], "clicked": ref, "via": "js"}
             if x is None or y is None:
                 raise CdpError("act click: need --ref or --x/--y")
             cdp.mouse_click(x, y, button, count)
-            return {"profile": name, "tab": tid[:8], "clicked": [x, y]}
+            return {"profile": name, "tab": str(tid)[:8], "clicked": [x, y]}
         if kind == "type":
             if not ref or text is None:
                 raise CdpError("act type: need --ref and --text")
@@ -148,7 +157,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             obj = cdp.resolve_object(backend)
             cdp.call_on(obj, "function(){ this.focus(); }")
             cdp.insert_text(text)
-            return {"profile": name, "tab": tid[:8], "typed": ref, "chars": len(text)}
+            return {"profile": name, "tab": str(tid)[:8], "typed": ref, "chars": len(text)}
         if kind == "clear":
             if not ref:
                 raise CdpError("act clear: need --ref")
@@ -156,7 +165,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             obj = cdp.resolve_object(backend)
             cdp.call_on(obj, "function(){ this.focus(); this.select(); }")
             cdp.press_key("Backspace")
-            return {"profile": name, "tab": tid[:8], "cleared": ref}
+            return {"profile": name, "tab": str(tid)[:8], "cleared": ref}
         if kind == "key":
             if key is None:
                 raise CdpError("act key: need --key")
@@ -164,7 +173,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
                 backend = _backend(name, tab, ref, cdp, tid)
                 cdp.call_on(cdp.resolve_object(backend), "function(){ this.focus(); }")
             cdp.press_key(key)
-            return {"profile": name, "tab": tid[:8], "key": key}
+            return {"profile": name, "tab": str(tid)[:8], "key": key}
         if kind == "hover":
             if ref:
                 backend = _backend(name, tab, ref, cdp, tid)
@@ -174,19 +183,19 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             else:
                 raise CdpError("act hover: need --ref or --x/--y")
             cdp.mouse_move(cx, cy)
-            return {"profile": name, "tab": tid[:8], "hover": [round(cx), round(cy)]}
+            return {"profile": name, "tab": str(tid)[:8], "hover": [round(cx), round(cy)]}
         if kind == "scroll":
             if ref:
                 backend = _backend(name, tab, ref, cdp, tid)
                 obj = cdp.resolve_object(backend)
                 cdp.call_on(obj, "function(){ this.scrollIntoView({block:'center'}); }")
-                return {"profile": name, "tab": tid[:8], "scrolledTo": ref}
+                return {"profile": name, "tab": str(tid)[:8], "scrolledTo": ref}
             if x is None or y is None:
                 vw = cdp.evaluate("window.innerWidth/2") or 400
                 vh = cdp.evaluate("window.innerHeight/2") or 300
                 x, y = float(vw), float(vh)
             cdp.scroll_at(x, y, dx, dy)
-            return {"profile": name, "tab": tid[:8], "scrolled": [x, y, dx, dy]}
+            return {"profile": name, "tab": str(tid)[:8], "scrolled": [x, y, dx, dy]}
         if kind == "select":
             if not ref or value is None:
                 raise CdpError("act select: need --ref and --value")
@@ -194,13 +203,13 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             obj = cdp.resolve_object(backend)
             ok = cdp.call_on(obj, "function(v){ this.value = v; this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); return this.value === v; }",
                              [{"value": value}])
-            return {"profile": name, "tab": tid[:8], "selected": ref, "ok": bool(ok)}
+            return {"profile": name, "tab": str(tid)[:8], "selected": ref, "ok": bool(ok)}
         if kind == "focus":
             if not ref:
                 raise CdpError("act focus: need --ref")
             backend = _backend(name, tab, ref, cdp, tid)
             cdp.call_on(cdp.resolve_object(backend), "function(){ this.focus(); }")
-            return {"profile": name, "tab": tid[:8], "focused": ref}
+            return {"profile": name, "tab": str(tid)[:8], "focused": ref}
         if kind == "fill":
             pairs: list[tuple[str, str]] = []
             if ref is not None and text is not None:
@@ -214,7 +223,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
                 raise CdpError("act fill: need --ref+--text or --field ref=value")
             done = [r for r, v in pairs
                     if _fill_one(cdp, _backend(name, tab, r, cdp, tid), v)]
-            return {"profile": name, "tab": tid[:8], "filled": done,
+            return {"profile": name, "tab": str(tid)[:8], "filled": done,
                     "failed": [r for r, _ in pairs if r not in done]}
         if kind in ("check", "uncheck"):
             if not ref:
@@ -224,7 +233,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             obj = cdp.resolve_object(backend)
             state = cdp.call_on(obj, "function(w){ if(this.checked!==w){ this.click(); }"
                 " return this.checked; }", [{"value": want}])
-            return {"profile": name, "tab": tid[:8], kind + "ed": ref,
+            return {"profile": name, "tab": str(tid)[:8], kind + "ed": ref,
                     "checked": bool(state)}
         if kind == "drag":
             if ref:
@@ -239,7 +248,7 @@ def do_act(name: str, kind: str, tab: str | None, ref: str | None = None,
             cdp.mouse_down(sx, sy, button)
             cdp.mouse_move(ex, ey)
             cdp.mouse_up(ex, ey, button)
-            return {"profile": name, "tab": tid[:8], "drag": [round(sx), round(sy), round(ex), round(ey)]}
+            return {"profile": name, "tab": str(tid)[:8], "drag": [round(sx), round(sy), round(ex), round(ey)]}
     raise CdpError(f"act: unknown kind {kind!r} (click|type|clear|key|hover|scroll|select|focus|fill|check|uncheck|drag)")
 
 
@@ -255,13 +264,13 @@ def do_wait(name: str, tab: str | None, text: str | None, selector: str | None,
                 if text:
                     body = cdp.evaluate("document.body ? document.body.innerText.slice(0,60000) : ''") or ""
                     if text.lower() in body.lower():
-                        return {"profile": name, "tab": tid[:8], "matched": f"text:{text}"}
+                        return {"profile": name, "tab": str(tid)[:8], "matched": f"text:{text}"}
                 else:
                     assert selector is not None
                     found = cdp.evaluate(
                         f"!!document.querySelector({selector!r})")
                     if found:
-                        return {"profile": name, "tab": tid[:8], "matched": f"selector:{selector}"}
+                        return {"profile": name, "tab": str(tid)[:8], "matched": f"selector:{selector}"}
             except CdpError:
                 pass
             if time.monotonic() >= deadline:
@@ -276,11 +285,11 @@ def do_read(name: str, tab: str | None, fmt: str, selector: str | None) -> dict[
         if fmt == "console":
             cdp.enable_console_capture()
             time.sleep(1.0)
-            return {"profile": name, "tab": tid[:8], "url": url, "errors": cdp.console_errors()}
+            return {"profile": name, "tab": str(tid)[:8], "url": url, "errors": cdp.console_errors()}
         if fmt == "links":
             links = cdp.evaluate(
                 "[...document.querySelectorAll('a[href]')].slice(0,300).map(a=>({text:(a.innerText||'').trim().slice(0,120),href:a.href}))") or []
-            return {"profile": name, "tab": tid[:8], "url": url, "links": links}
+            return {"profile": name, "tab": str(tid)[:8], "url": url, "links": links}
         if selector:
             text = cdp.evaluate(
                 f"(()=>{{const el=document.querySelector({selector!r});return el?el.innerText.slice(0,30000):''}})()") or ""
@@ -288,7 +297,7 @@ def do_read(name: str, tab: str | None, fmt: str, selector: str | None) -> dict[
             text = cdp.evaluate(_MD_WALKER) or ""
         else:
             text = cdp.evaluate("document.body ? document.body.innerText.slice(0,30000) : ''") or ""
-    return {"profile": name, "tab": tid[:8], "url": url, "format": fmt,
+    return {"profile": name, "tab": str(tid)[:8], "url": url, "format": fmt,
             "content": snap.trust_wrap(text, url or "unknown")}
 
 
@@ -302,7 +311,7 @@ def do_grep(name: str, tab: str | None, pattern: str, over: str, limit: int) -> 
         else:
             text = cdp.evaluate("document.body ? document.body.innerText.slice(0,60000) : ''") or ""
     matches = snap.grep_lines(text, pattern, limit)
-    return {"profile": name, "tab": tid[:8], "url": url, "pattern": pattern,
+    return {"profile": name, "tab": str(tid)[:8], "url": url, "pattern": pattern,
             "matches": snap.trust_wrap("\n".join(matches), url or "unknown"), "count": len(matches)}
 
 
@@ -319,7 +328,7 @@ def do_screenshot(name: str, tab: str | None, fmt: str, quality: int,
         raw = cdp.capture_screenshot(fmt, quality, full)
     path = Path(out) if out else _shot_path(name, fmt)
     path.write_bytes(raw)
-    return {"profile": name, "tab": tid[:8], "path": str(path), "bytes": len(raw)}
+    return {"profile": name, "tab": str(tid)[:8], "path": str(path), "bytes": len(raw)}
 
 
 def do_pdf(name: str, tab: str | None, landscape: bool, background: bool,
@@ -331,7 +340,7 @@ def do_pdf(name: str, tab: str | None, landscape: bool, background: bool,
     _paths.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     path = Path(out) if out else _paths.RUNTIME_DIR / f"page.{name}.{int(time.time())}.pdf"
     path.write_bytes(raw)
-    return {"profile": name, "tab": tid[:8], "path": str(path), "bytes": len(raw)}
+    return {"profile": name, "tab": str(tid)[:8], "path": str(path), "bytes": len(raw)}
 
 
 def _is_remote(name: str) -> bool:
@@ -341,7 +350,35 @@ def _is_remote(name: str) -> bool:
 
 def do_download(name: str, tab: str | None, ref: str, out_dir: str,
                 timeout: float = 30.0) -> dict[str, Any]:
-    remote = _is_remote(name)
+    from .engines import ENGINE_OBScura
+    from .keeper import KeeperError
+
+    info = _read_lock(name)
+    remote = bool(info and info.remote)
+    if info is not None and not remote and info.engine == ENGINE_OBScura:
+        raise CdpError(
+            "download: not supported by the obscura engine (its CDP accepts "
+            "Browser.setDownloadBehavior but no file is written and no "
+            "downloadProgress events fire). Fetch bytes with `cloakctl run "
+            "'await fetch(url).then(r=>r.blob())'`-style JS or download "
+            "outside the browser; use --engine cloakbrowser for CDP downloads.")
+    if remote:
+        # Remote is Chromium-family by contract; if the endpoint fronts an
+        # obscura anyway, downloads will silently land nowhere. Detect it.
+        try:
+            cdp_probe = CdpClient(info.ws_endpoint, timeout=8)
+            with cdp_probe:
+                ver = cdp_probe.call("Browser.getVersion")
+            if re.fullmatch(r"Chrome/\d+\.0\.0\.0", str(ver.get("product") or "")):
+                raise CdpError(
+                    "download: the remote endpoint fronts an obscura engine, "
+                    "which writes no download files and fires no progress "
+                    "events. Remote downloads need a Chromium-family browser "
+                    "on the host (open --engine cloakbrowser there).")
+        except CdpError:
+            raise
+        except Exception:
+            pass  # probe is best-effort; the verb itself will report errors
     dest = Path(out_dir)
     if not remote:
         dest.mkdir(parents=True, exist_ok=True)
@@ -385,7 +422,7 @@ def do_download(name: str, tab: str | None, ref: str, out_dir: str,
                     pass
                 guids = [g for g, s in completed.items() if s == "completed"]
                 if guids:
-                    return {"profile": name, "tab": tid[:8], "remote": True,
+                    return {"profile": name, "tab": str(tid)[:8], "remote": True,
                             "guid": guids[0], "dir": dl_dir,
                             "note": "remote browser: file landed browser-side "
                                     f"under {dl_dir}"}
@@ -400,7 +437,7 @@ def do_download(name: str, tab: str | None, ref: str, out_dir: str,
             done = [p for p in new if p.is_file()]
             if done:
                 biggest = max(done, key=lambda p: p.stat().st_size)
-                return {"profile": name, "tab": tid[:8], "path": str(biggest),
+                return {"profile": name, "tab": str(tid)[:8], "path": str(biggest),
                         "bytes": biggest.stat().st_size}
             if time.monotonic() >= deadline:
                 raise CdpError(f"download: timeout after {timeout}s")
@@ -424,7 +461,11 @@ def object_for_selector(cdp, selector: str) -> str:
 
 def do_upload(name: str, tab: str | None, ref: str | None, files: list[str],
               selector: str | None = None) -> dict[str, Any]:
-    remote = _is_remote(name)
+    from .engines import ENGINE_OBScura
+
+    info = _read_lock(name)
+    remote = bool(info and info.remote)
+    obscura = bool(info and not remote and info.engine == ENGINE_OBScura)
     for f in files:
         if not Path(f).is_file():
             hint = (" (remote profile: stage the file on the BROWSER host "
@@ -442,13 +483,25 @@ def do_upload(name: str, tab: str | None, ref: str | None, files: list[str],
             obj = cdp.resolve_object(_backend(name, tab, ref, cdp, tid))
             via = ref
         try:
+            # Cross-engine guard: chromium rejects non-file inputs at the CDP
+            # layer, obscura silently accepts them. Fail the same way on both.
+            is_file = cdp.call_on(obj, "function(){ return this.tagName === 'INPUT' "
+                                       "&& String(this.type).toLowerCase() === 'file'; }")
+            if not is_file:
+                raise CdpError("upload: element is not a file input "
+                               "(use input[type=file])")
             cdp.set_input_files(obj, [str(Path(f).resolve()) for f in files])
         except CdpError as e:
             if remote:
                 raise CdpError(f"{e} (remote profile: paths resolve on the "
                                f"BROWSER host, not this machine)")
+            if obscura and "disabled" in str(e).lower():
+                raise CdpError(
+                    f"{e} — obscura gates DOM.setFileInputFiles behind "
+                    "--allow-file-access; re-open with "
+                    "`cloakctl open <profile> --browser-arg=--allow-file-access`")
             raise
-    doc: dict[str, Any] = {"profile": name, "tab": tid[:8],
+    doc: dict[str, Any] = {"profile": name, "tab": str(tid)[:8],
                            "uploaded": via, "files": files}
     if remote:
         doc["remote"] = True
@@ -464,4 +517,4 @@ def do_run(name: str, tab: str | None, code: str, timeout: float = 30.0) -> dict
             value = cdp.run_program(code)
     finally:
         cdp.timeout = old
-    return {"profile": name, "tab": tid[:8], "value": value}
+    return {"profile": name, "tab": str(tid)[:8], "value": value}

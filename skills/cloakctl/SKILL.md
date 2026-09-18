@@ -2,13 +2,14 @@
 name: cloakctl
 description: >
   Use and operationalize the cloakctl system — one persistent stealth
-  browser per profile driven by CLI verbs over --json, plus a registry where
-  agents compound reusable automations (skill macros vs typed wf modules).
-  Use this skill whenever the user mentions cloakctl, cloakbrowser, browser
-  profiles, CDP endpoints, cookie import/validation, or asks to drive,
-  automate, debug, or scale browser sessions — including running workflows
-  (wf), saving skill macros, parallel --new-tab runs, remote VPS-side CLI
-  with --endpoint, or anything "using the cloakctl infra". Even if the user
+  browser per profile (obscura engine by default, Chromium opt-in) driven
+  by CLI verbs over --json, plus a registry where agents compound reusable
+  automations (skill macros vs typed wf modules). Use this skill whenever
+  the user mentions cloakctl, cloakbrowser, obscura, browser profiles, CDP
+  endpoints, cookie import/validation, or asks to drive, automate, debug,
+  or scale browser sessions — including running workflows (wf), saving
+  skill macros, parallel --new-tab runs, remote VPS-side CLI with
+  --endpoint, or anything "using the cloakctl infra". Even if the user
   doesn't name cloakctl, use it when the task is persistent-browser
   automation on this machine.
 metadata:
@@ -54,15 +55,33 @@ call tree, run doc, and log) — never pasted into skill notes.
 
 ## Install + verify (fresh system)
 
-Prerequisites: python ≥ 3.10 and one Chromium (`cloakbrowser`, `chromium`,
-`chrome`, `brave`, `edge`; override with `CLOAKCTL_BROWSER`).
+Prerequisites: python ≥ 3.10. The default engine is **obscura** — the
+installer downloads its binary from GitHub releases (no Chromium needed).
+The Chromium engine (**cloakbrowser**) is opt-in: `--engine cloakbrowser`
+at install time or per profile (`open --engine cloakbrowser`; needs
+`cloakbrowser`, `chromium`, `chrome`, `brave`, or `edge`; override with
+`CLOAKCTL_BROWSER`).
 
 ```bash
 git clone https://github.com/ishan-parihar/cloakctl && cd cloakctl
-./install.sh        # pipx when present, else an isolated venv
-cloakctl doctor     # tolerates a missing browser; tells you what to install
+./install.sh        # installs cloakctl + obscura binary; pipx when present, else an isolated venv
+cloakctl doctor     # shows both engines + the default; tolerates a missing one
+cloakctl open <p> --engine cloakbrowser   # per-profile Chromium opt-in
+cloakctl open <p> --stealth               # obscura stealth mode (fingerprint/TLS)
 scripts/smoke.sh    # end-to-end check on an isolated state dir (no ~/.cloakctl touched)
 ```
+
+## Engine honesty (obscura, the default)
+
+- **One page per profile**: `tabs new` navigates the persistent page
+  (reported as `navigated: true`) — use separate profiles for isolation.
+- **`download` and `history` fail fast** with remediation hints: fetch bytes
+  with `cloakctl run 'await fetch(url).then(r=>r.blob())'`-style JS; use
+  `audit` trails instead of browser history.
+- **Uploads** need `open <p> --browser-arg=--allow-file-access`.
+- **Private/internal IPs** (localhost, 10.x, ...) are blocked by the engine
+  unless opened with `--browser-arg=--allow-private-network`.
+- ~60 MB and ~0.25s cold launch per profile (vs ~1.1 GB / ~0.4s on Chromium).
 
 ## The core loop
 
@@ -122,19 +141,25 @@ no saved skill/workflow suggests `skill save` → `skill promote`.
 ## Remote mode (VPS-side CLI, browser elsewhere)
 
 `open --endpoint` attaches over a tunnel instead of launching — the CLI
-needs no browser where it runs (~0 persistent RAM on the VPS):
+needs no browser where it runs (~0 persistent RAM on the VPS).
+**Chromium-family only**: obscura's CDP is per-connection isolated (a second
+connection sees an empty session), so the browser host must run
+`open <p> --engine cloakbrowser` before you tunnel the endpoint.
 
 ```bash
-# browser host: open normally, publish wsEndpoint via your tunnel (Access on)
+# browser host: open --engine cloakbrowser, publish wsEndpoint via your tunnel (Access on)
 # VPS side:
 cloakctl open linkedin --endpoint wss://cdp.example.com/s/...   # or CLOAKCTL_CDP_URL
 cloakctl validate linkedin && cloakctl wf run pc --profile linkedin --new-tab
 cloakctl close linkedin        # detaches, never kills
 ```
 
-Do the cookie `import` where the browser lives. `screenshot`/`pdf` bytes
-travel over the socket; `download` lands browser-side (returned `dir` +
-`guid`); `upload` paths must exist on the browser host.
+An empty `--endpoint`/env var is refused (never a silent local launch), and
+`attach` on an obscura profile explains the Chromium requirement instead of
+printing a null endpoint. Do the cookie `import` where the browser lives.
+`screenshot`/`pdf` bytes travel over the socket; `download` lands
+browser-side (returned `dir` + `guid`); `upload` paths must exist on the
+browser host.
 
 ## Going deeper (references/)
 

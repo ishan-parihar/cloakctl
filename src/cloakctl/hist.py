@@ -26,6 +26,14 @@ def _history_db(name: str) -> Path:
     nested = sorted(cdir.glob("*/History"), key=lambda p: p.stat().st_mtime, reverse=True)
     if nested:
         return nested[0]
+    from .engines import ENGINE_OBScura
+    from .locks import read_lock as _rl
+    info = _rl(name)
+    if info is not None and info.engine == ENGINE_OBScura:
+        raise FileNotFoundError(
+            f"no History db for profile {name!r}: the obscura engine does not "
+            "write a Chromium History sqlite (browser history is not recorded "
+            "on disk). Use per-run audit trails instead.")
     raise FileNotFoundError(f"no History db for profile {name!r} yet (browse first)")
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from typing import Any
 
 import websockets  # type: ignore
@@ -39,6 +40,10 @@ class CdpClient:
         self._send_lock = threading.Lock()
         self._event_handlers: dict[str, list] = {}
         self.console_buffer: list[dict] = []
+        # obscura passthrough state (see open_over_keeper)
+        self._keeper: Any = None
+        self._via_keeper = False
+        self._keeper_error: Any = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -50,6 +55,8 @@ class CdpClient:
         self.close()
 
     def connect(self) -> None:
+        if self._via_keeper:
+            return  # keeper-bound: already connected
         if self._ws is not None:
             return
         self._loop = asyncio.new_event_loop()
@@ -57,9 +64,13 @@ class CdpClient:
         self._thread.start()
         try:
             async def _aconnect():
+                # Ping keepalive OFF: a runaway page (while(true){}) can stall
+                # obscura's CDP server for many seconds; the default 20s ping
+                # timeout then kills the WS mid-session. Liveness is per-call
+                # (timeout on each await recv), not connection-level.
                 return await websockets.connect(
-                    self.ws_url, max_size=64 * 1024 * 1024
-                )
+                    self.ws_url, max_size=64 * 1024 * 1024,
+                    ping_interval=None)
 
             self._ws = self._run(_aconnect())
         except Exception:
@@ -67,7 +78,13 @@ class CdpClient:
             raise
 
     def on_event(self, method: str, handler) -> None:
-        """Register a callback(event_dict) for a CDP event method."""
+        """Register a callback(event_dict) for a CDP event method.
+
+        Keeper-bound clients: event subscriptions are acknowledged but not
+        delivered (events fire in the keeper process). No cloakctl verb
+        depends on events except the download wait, which fails fast on
+        obscura before it would ever need them.
+        """
         self._event_handlers.setdefault(method, []).append(handler)
 
     def _dispatch_event(self, data: dict) -> None:
@@ -102,6 +119,14 @@ class CdpClient:
         return errs
 
     def close(self) -> None:
+        if self._via_keeper:
+            keeper, self._keeper, self._via_keeper = self._keeper, None, False
+            if keeper is not None:
+                try:
+                    keeper.__exit__(None, None, None)
+                except Exception:
+                    pass
+            return
         if self._target_id is not None and self._owned_target:
             try:
                 self._run(self._acall("Target.closeTarget", {"targetId": self._target_id}))
@@ -133,7 +158,7 @@ class CdpClient:
 
     # --- command/response ----------------------------------------------------
 
-    async def _acall(self, method: str, params: dict | None = None) -> Any:
+    async    def _acall(self, method: str, params: dict | None = None) -> Any:
         assert self._ws is not None
         msg_id = self._next_id
         self._next_id += 1
@@ -142,7 +167,7 @@ class CdpClient:
             msg["sessionId"] = self._session_id
         await self._ws.send(json.dumps(msg))
 
-        for _ in range(1000):
+        while True:  # bounded per-recv by the timeout — never a fixed cap
             raw = await asyncio.wait_for(self._ws.recv(), self.timeout)
             data = json.loads(raw if isinstance(raw, str) else raw.decode())
             if "method" in data and "id" not in data:
@@ -152,17 +177,28 @@ class CdpClient:
                 if "error" in data:
                     raise CdpError(f"{method}: {data['error'].get('message')}")
                 return data.get("result", {})
-            # Interleaved events are ignored here; navigate() consumes its own.
-        raise CdpError(f"{method}: no response")
+            # Stale responses (e.g. to calls whose deadline already fired on
+            # a previous verb) are ignored; navigate() consumes its own.
 
     def call(self, method: str, params: dict | None = None) -> Any:
+        if self._via_keeper:
+            return self._kcall(method, params)
         with self._send_lock:
             return self._run(self._acall(method, params))
 
     # --- domain helpers --------------------------------------------------------
 
     def ensure_page_session(self) -> str:
-        """Attach a flat session to a fresh page target; bind subsequent calls."""
+        """Attach a flat session to a fresh page target; bind subsequent calls.
+
+        Keeper-bound (obscura): the keeper already holds the profile's page
+        session — this is a no-op returning that session's identity. A direct
+        createTarget here would navigate the persistent page away.
+        """
+        if self._via_keeper:
+            self._target_id = self._target_id or "keeper-page"
+            self._owned_target = False
+            return self._session_id or "keeper-session"
         if self._session_id:
             return self._session_id
         res = self.call("Target.createTarget", {"url": "about:blank"})
@@ -173,7 +209,15 @@ class CdpClient:
         return self._session_id
 
     def bind_target(self, target_id: str) -> str:
-        """Attach to an EXISTING page target (a tab). Never closed by us."""
+        """Attach to an EXISTING page target (a tab). Never closed by us.
+
+        Keeper-bound: binding is a bookkeeping no-op (the keeper's session
+        IS the profile session); the id is remembered for ref-scoping only.
+        """
+        if self._via_keeper:
+            self._target_id = target_id or self._target_id or "keeper-page"
+            self._owned_target = False
+            return self._session_id or "keeper-session"
         res = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True})
         self._target_id = target_id
         self._owned_target = False
@@ -391,9 +435,31 @@ class CdpClient:
                 break
         return res
 
+    def _navigate_and_poll(self, url: str, load_timeout: float) -> dict:
+        """Keeper-bound navigate: no local event stream exists (events fire
+        in the keeper process), so wait for load by polling document.readyState
+        through the session. Best-effort like the direct-WS path: on timeout
+        the navigation result is still returned."""
+        res = self._kcall("Page.navigate", {"url": url})
+        deadline = time.monotonic() + load_timeout
+        while time.monotonic() < deadline:
+            try:
+                state = self._kcall("Runtime.evaluate", {
+                    "expression": "document.readyState",
+                    "returnByValue": True, "awaitPromise": False,
+                }).get("result", {}).get("value")
+            except CdpError:
+                return res  # page tearing down mid-navigation; done trying
+            if state in ("complete", "interactive"):
+                break
+            time.sleep(0.1)
+        return res
+
     def navigate(self, url: str, load_timeout: float = 30.0) -> dict:
         """Navigate the bound page; wait for load (best-effort)."""
         self.ensure_page_session()
+        if self._via_keeper:
+            return self._navigate_and_poll(url, load_timeout)
         self.call("Page.enable")  # needed for loadEventFired
         with self._send_lock:
             return self._run(self._anavigate_and_wait(url, load_timeout))
@@ -417,6 +483,35 @@ class CdpClient:
             raise CdpError(f"evaluate: {result.get('description', 'JS error')}")
         return result.get("value")
 
+    # --- obscura passthrough --------------------------------------------------
+
+    def open_over_keeper(self, profile: str, timeout: float | None = None) -> "CdpClient":
+        """Rebind this client onto a profile's obscura keeper session.
+
+        Every method routes through the keeper's persistent CDP connection
+        (obscura page state is per-connection; the keeper HOLDS the session
+        that survives between CLI verbs). The keeper raises KeeperError for
+        protocol errors; we re-raise them as CdpError so verb error paths
+        stay uniform.
+        """
+        from .keeper import KeeperClient, KeeperError
+
+        self._keeper = KeeperClient(profile, timeout=timeout or 60.0)
+        self._keeper.__enter__()
+        self._via_keeper = True
+        self._keeper_error = KeeperError
+        return self
+
+    def _kcall(self, method: str, params: dict | None) -> Any:
+        # Per-call deadline: the socket timeout IS this client's timeout.
+        # (do_run/do_exec raise cdp.timeout for long JS; the handler-side
+        # watchdog is the last-resort backstop, not the primary clock.)
+        self._keeper.timeout = max(self.timeout, 1.0)
+        try:
+            return self._keeper.call(method, params)
+        except self._keeper_error as e:  # type: ignore[misc]
+            raise CdpError(f"{method}: {e}") from e
+
 
 def http_json(url: str, timeout: float = 5.0) -> dict:
     """GET a DevTools HTTP endpoint (e.g. /json/version) without heavy deps."""
@@ -426,9 +521,43 @@ def http_json(url: str, timeout: float = 5.0) -> dict:
         return json.loads(resp.read())
 
 
-def cdp_call(fn, *args, **kwargs):
-    """Run a blocking CdpClient method in a worker thread (for asyncio callers)."""
-    return asyncio.get_running_loop().run_in_executor(None, lambda: fn(*args, **kwargs))
+cdp_call = None  # removed: asyncio callers should use CdpClient directly
 
 
-__all__ = ["CdpClient", "CdpError", "cdp_call", "http_json"]
+def open_client(profile: str, timeout: float = 120.0):
+    """The one true client factory.
+
+    Returns a CdpClient bound to the profile's browser session, whichever
+    engine it runs on:
+
+    - obscura: rebound over the profile keeper's persistent CDP session
+      (obscura page state is per-connection; the keeper HOLDS the session
+      between verbs, so the profile's cookies/logins/navigation survive).
+    - cloakbrowser: a direct WS connection to the browser endpoint (state
+      lives in the browser's --user-data-dir, connections are interchangeable).
+
+    Use as a context manager: `with open_client(profile) as cdp: ...`
+    """
+    from . import browser as browser_mod
+
+    st = browser_mod.status_profile(profile)
+    if not st.get("live"):
+        raise RuntimeError(
+            f"profile {profile!r} is not live; run `cloakctl open {profile}` first")
+    if st.get("engine") == "obscura":
+        client = CdpClient("keeper://", timeout=timeout)
+        client.open_over_keeper(profile, timeout=timeout)
+        return client
+    return CdpClient(st["wsEndpoint"], timeout=timeout)
+
+
+def connect_client(cdp: "CdpClient") -> "CdpClient":
+    """Backward-compat shim for old call sites that did `cdp.connect()`.
+    Keeper-bound clients are already connected; direct WS clients are
+    connected at construction by open_client()."""
+    if not cdp._via_keeper and cdp._ws is None:
+        cdp.connect()
+    return cdp
+
+
+__all__ = ["CdpClient", "CdpError", "http_json", "open_client"]

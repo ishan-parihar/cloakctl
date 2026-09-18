@@ -1,30 +1,126 @@
 #!/usr/bin/env bash
 # cloakctl installer — idempotent, re-runnable.
-#   ./install.sh              # pipx if present, else an isolated venv
-#   ./install.sh --venv       # force the venv install
-#   ./install.sh --check-only # verify an existing install, install nothing
+#
+#   ./install.sh                       # cloakctl + obscura (default engine)
+#   ./install.sh --engine cloakbrowser # opt-in: skip obscura, need a Chromium
+#   ./install.sh --obscura-only        # just fetch the obscura binary
+#   ./install.sh --obscura-build <flavor>  # stealth|no-render-stealth|plain|no-render (default: stealth)
+#   ./install.sh --venv                # force the venv install for cloakctl
+#   ./install.sh --check-only          # verify an existing install, install nothing
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-$HOME/.local/share/cloakctl/venv}"
 BIN_LINK="$HOME/.local/bin/cloakctl"
 MODE="auto"
+ENGINE="obscura"           # default engine: obscura (cloakbrowser is opt-in)
+OBSCURA_BUILD="stealth"
+OBSCURA_ONLY=0
+PINNED_TAG="v0.2.2"        # fallback when the GitHub API is unreachable
 
-for arg in "$@"; do
-  case "$arg" in
+usage() {
+  echo "usage: ./install.sh [--engine obscura|cloakbrowser] [--obscura-only]"
+  echo "                    [--obscura-build stealth|no-render-stealth|plain|no-render]"
+  echo "                    [--venv] [--check-only]"
+  echo "  default: installs cloakctl AND the obscura binary (cloakctl's default engine)."
+  echo "  --engine cloakbrowser opts out of obscura and expects a Chromium-family browser."
+  exit 0
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --venv) MODE="venv" ;;
     --check-only) MODE="check" ;;
-    -h|--help)
-      echo "usage: ./install.sh [--venv] [--check-only]"
-      echo "  default: pipx when available, isolated venv otherwise."
-      exit 0 ;;
-    *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
+    --obscura-only) OBSCURA_ONLY=1 ;;
+    --engine=*) ENGINE="${1#*=}" ;;
+    --engine) ENGINE="${2:-}"; shift ;;
+    --obscura-build=*) OBSCURA_BUILD="${1#*=}" ;;
+    --obscura-build) OBSCURA_BUILD="${2:-}"; shift ;;
+    -h|--help) usage ;;
+    *) echo "unknown flag: $1 (try --help)" >&2; exit 2 ;;
   esac
+  shift
 done
+
+case "$ENGINE" in
+  obscura|cloakbrowser) ;;
+  *) echo "--engine must be 'obscura' (default) or 'cloakbrowser'" >&2; exit 2 ;;
+esac
+case "$OBSCURA_BUILD" in
+  stealth|no-render-stealth|plain|no-render) ;;
+  *) echo "--obscura-build must be stealth|no-render-stealth|plain|no-render" >&2; exit 2 ;;
+esac
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)" >&2; exit 1; }; }
 
+fetch() { # fetch <url> <out>
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --max-time 300 "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -qT 300 -O "$2" "$1"
+  else return 1; fi
+}
+
+# --- 0. obscura binary (the default engine) ---------------------------------
+install_obscura() {
+  local os arch flavor asset url tag tmp
+  case "$(uname -s)" in
+    Linux) os="linux" ;;
+    Darwin) os="macos" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) echo "obscura: unsupported OS $(uname -s) — install it manually (github.com/h4ckf0r0day/obscura)" >&2; return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) echo "obscura: unsupported arch $(uname -m)" >&2; return 1 ;;
+  esac
+  if [ "$os" = "windows" ]; then asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.zip"
+  else asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.tar.gz"; fi
+  url="https://github.com/h4ckf0r0day/obscura/releases/download/${PINNED_TAG}/${asset}"
+  # latest tag when the API is reachable (asset names are stable across tags)
+  tag="$(fetch https://api.github.com/repos/h4ckf0r0day/obscura/releases/latest /dev/stdout 2>/dev/null \
+        | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  if [ -n "${tag:-}" ]; then url="${url/$PINNED_TAG/$tag}"; fi
+
+  echo "obscura: downloading ${asset}${tag:+ ($tag)}..."
+  tmp="$(mktemp -d)"
+  if ! fetch "$url" "$tmp/obscura-archive"; then
+    echo "obscura: download failed — check your network or grab it manually:" >&2
+    echo "  $url" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  mkdir -p "$HOME/.local/bin"
+  if [ "$os" = "windows" ]; then
+    unzip -o -q "$tmp/obscura-archive" -d "$HOME/.local/bin"
+  else
+    tar -xzf "$tmp/obscura-archive" -C "$tmp"
+    for bin in "$tmp"/obscura*; do
+      [ -f "$bin" ] || continue
+      install -m 0755 "$bin" "$HOME/.local/bin/$(basename "$bin")"
+    done
+  fi
+  rm -rf "$tmp"
+  command -v obscura >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
+  if command -v obscura >/dev/null 2>&1; then
+    echo "obscura: installed -> $(command -v obscura)"
+  else
+    echo "obscura: installed to $HOME/.local/bin (add it to PATH)" >&2
+  fi
+}
+
+if [ "$MODE" != "check" ] && [ "$ENGINE" = "obscura" ]; then
+  if command -v obscura >/dev/null 2>&1 || [ -x "$HOME/.local/bin/obscura" ]; then
+    echo "obscura: already present ($(command -v obscura || echo "$HOME/.local/bin/obscura"))"
+  else
+    install_obscura || echo "continuing without obscura — cloakctl will fail to open profiles until it is installed" >&2
+  fi
+fi
+
 # --- 1. interpreter ---------------------------------------------------------
+if [ "$OBSCURA_ONLY" = "1" ]; then
+  echo "obscura-only install complete."
+  exit 0
+fi
+
 need python3 "install python3 (>=3.10) first"
 PY_OK="$(python3 -c 'import sys; print("yes" if sys.version_info >= (3, 10) else "no")')"
 [ "$PY_OK" = "yes" ] || { echo "python3 must be >= 3.10" >&2; exit 1; }
@@ -51,9 +147,15 @@ BIN="$(command -v cloakctl || true)"
 
 # --- 3. verify --------------------------------------------------------------
 echo "cloakctl: $($BIN --version)"
-echo "--- doctor (browser may be absent on a fresh box; install it next) ---"
+echo "--- doctor ---"
 "$BIN" doctor || true
 case "$PATH" in *"$HOME/.local/bin"*) ;; *) echo "NOTE: ~/.local/bin is not on your PATH yet" ;; esac
 echo "---"
-echo "next: install a Chromium (cloakbrowser, chromium, chrome, brave or edge),"
-echo "then: cloakctl profiles create <name> && cloakctl open <name>"
+if [ "$ENGINE" = "obscura" ]; then
+  echo "default engine: obscura — just: cloakctl profiles create <name> && cloakctl open <name>"
+  echo "opt into the Chromium engine any time: cloakctl open <name> --engine cloakbrowser"
+else
+  echo "engine: cloakbrowser (opt-in). Install a Chromium-family browser"
+  echo "(cloakbrowser, chromium, chrome, brave or edge) if doctor shows none,"
+  echo "then: cloakctl profiles create <name> && cloakctl open <name> --engine cloakbrowser"
+fi

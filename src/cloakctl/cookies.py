@@ -284,8 +284,9 @@ def import_to_profile(
         summary["aborted"] = True
         return summary
 
-    ws = st["wsEndpoint"]
-    with CdpClient(ws) as cdp:
+    from .cdp import open_client
+
+    with open_client(name) as cdp:
         cdp.set_cookies(cdp_cookies)
         jar_after = cdp.get_cookies()
     summary["imported"] = len(cdp_cookies)
@@ -346,15 +347,10 @@ VALIDATION_PROBE_URL = os.environ.get("CLOAKCTL_PROBE_URL", "https://www.linkedi
 
 def validate_context(name: str, probe_url: str | None = None) -> dict:
     """Navigate the live profile browser to the probe and classify the session."""
-    from . import browser as browser_mod
+    from .cdp import open_client
 
-    st = browser_mod.status_profile(name)
-    if not st.get("live"):
-        raise RuntimeError(f"profile {name!r} is not live; open it first")
-    ws = st["wsEndpoint"]
     url = probe_url or VALIDATION_PROBE_URL
-    with CdpClient(ws) as cdp:
-        cdp.ensure_page_session()
+    with open_client(name) as cdp:
         cdp.navigate(url, load_timeout=30.0)
         final_url = cdp.evaluate("location.href") or url
         body = cdp.evaluate("document.body ? document.body.innerText.slice(0, 20000) : ''") or ""

@@ -22,9 +22,13 @@ PROFILE_META_VERSION = 1
 
 def check_name(name: str) -> str:
     """Every path builder routes through here: profile names can never
-    escape the state dir (`audit ../../x` reads nothing outside)."""
-    if not name or "/" in name or name.startswith("."):
-        raise ValueError(f"invalid profile name: {name!r}")
+    escape the state dir (`audit ../../x` reads nothing outside), and must
+    be shell/tab-completion friendly (strict charset, bounded length)."""
+    import re as _re
+    if not name or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+        raise ValueError(
+            f"invalid profile name: {name!r} (use 1-64 chars of "
+            "[A-Za-z0-9_-], starting with a letter or digit)")
     return name
 
 

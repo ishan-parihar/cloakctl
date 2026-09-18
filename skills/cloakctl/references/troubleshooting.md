@@ -9,7 +9,15 @@ Find your error, read the cause, apply the fix.
 |---|---|---|
 | `profile X is not live; run cloakctl open X` | no browser running | `cloakctl open X` |
 | `profile X is already live (pid N, cdp port P); use attach` | a live browser owns the profile | keep using it (verbs re-attach) or `cloakctl close X` |
-| `no browser binary found` | no Chromium on PATH | install one, or `CLOAKCTL_BROWSER=/path/to/chrome` |
+| `no browser binary found` | no Chromium on PATH (cloakbrowser engine) | install one, or `CLOAKCTL_BROWSER=/path/to/chrome`, or use the default: `open <p> --engine obscura` |
+| `engine 'obscura' requested but no obscura binary found` | obscura not installed | `./install.sh --obscura-only` (downloads the binary), or `open --engine cloakbrowser` |
+| `--endpoint was empty` / `CLOAKCTL_CDP_URL was empty` | remote mode asked for with no URL | set a `wss://...` URL, or unset the env var to launch locally |
+| `attach` refuses: `per-connection CDP` | profile runs obscura — no shareable endpoint | remote mode needs Chromium: on the browser host `open <p> --engine cloakbrowser`, then tunnel its ws endpoint |
+| warning: `remote browser looks like obscura` | endpoint fronts obscura; verbs would see an EMPTY session | host must relaunch with `--engine cloakbrowser` before tunneling |
+| `download: not supported by the obscura engine` | obscura accepts the CDP call but writes no file | fetch bytes with `run`-style JS (`await fetch(url).then(r=>r.blob())`) or use `--engine cloakbrowser` |
+| `no History db for profile X` (obscura) | obscura writes no Chromium History sqlite | use `audit <profile>` trails |
+| `upload ... disabled` (obscura) | obscura gates `DOM.setFileInputFiles` | re-open: `open <p> --browser-arg=--allow-file-access` |
+| `net::ERR_ADDRESS_PRIVATE`-style failures on localhost (obscura) | engine SSRF guard | re-open: `open <p> --browser-arg=--allow-private-network` |
 | `CLOAKCTL_BROWSER='...' not found on PATH` | override points nowhere | fix the path |
 | `remote endpoint unreachable` | tunnel down / wrong URL | check the tunnel; retry `open --endpoint` |
 | stale lock reported by doctor | browser was SIGKILLed | `open` reclaims automatically; `doctor` was just telling you |
@@ -44,7 +52,7 @@ Find your error, read the cause, apply the fix.
 | symptom | cause | fix |
 |---|---|---|
 | runs clobber each other's refs | parallel `wf run` on one shared tab | pass `--new-tab` (owned tab per run) |
-| `active` tab jumps between runs | last-writer-wins on the alias | it's advisory + validated; pass `--tab <id>` for determinism |
+| `active` tab jumps between runs | a closed tab left a dangling alias (older builds) | fixed: verbs record what they bind and closing owned tabs clears the alias; for determinism pass `--tab <id>` |
 | registry corrupted / lost runs | (should not happen) | atomic writes + interprocess locks; if you see it, report it |
 
 ## Diagnostics

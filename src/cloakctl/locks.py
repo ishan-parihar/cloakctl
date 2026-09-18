@@ -1,9 +1,13 @@
 """Per-profile single-writer lock.
 
 `open` on an already-live profile must re-attach, never launch a second
-chrome (BF-fix-2's guarantee, enforced locally). The lockfile records
+browser (BF-fix-2's guarantee, enforced locally). The lockfile records
 pid + startedAt; a live check verifies the pid actually exists and its
 start time matches, so stale pid reuse cannot fool us.
+
+The locked pid is the process that owns the browser session:
+- cloakbrowser engine: the browser main process itself
+- obscura engine: the keeper daemon (which supervises `obscura serve`)
 """
 
 from __future__ import annotations
@@ -20,8 +24,8 @@ from .util import atomic_write_json
 class ProfileInUseError(RuntimeError):
     def __init__(self, name: str, info: "LockInfo"):
         super().__init__(
-            f"profile {name!r} is already live (pid {info.pid}, cdp port {info.cdp_port}); "
-            f"use `cloakctl attach {name}` to re-attach"
+            f"profile {name!r} is already live (pid {info.pid}, "
+            f"engine {info.engine}); use `cloakctl attach {name}` to re-attach"
         )
         self.info = info
 
@@ -33,6 +37,8 @@ class LockInfo:
     cdp_port: int
     ws_endpoint: str | None = None
     remote: bool = False  # browser lives elsewhere; lock is attach-only
+    engine: str = "cloakbrowser"  # "obscura" | "cloakbrowser"
+    headed: bool = False
 
 
 def _proc_start_time(pid: int) -> float:
@@ -57,13 +63,32 @@ def read_lock(name: str) -> LockInfo | None:
             cdp_port=int(raw["cdpPort"]),
             ws_endpoint=raw.get("wsEndpoint"),
             remote=bool(raw.get("remote", False)),
+            engine=str(raw.get("engine") or "cloakbrowser"),
+            headed=bool(raw.get("headed", False)),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when the pid exists but is a zombie (dead, unreaped).
+
+    Keeper processes are spawned detached and may be reaped late or never
+    (their parent CLI process has exited, leaving them parented to init
+    briefly). os.kill(pid, 0) succeeds on zombies, so liveness checks that
+    rely on it alone treat dead processes as live and wait out full grace
+    periods on close. State is read from /proc/<pid>/stat field 3.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat[stat.rindex(")") + 2:].split()[0] == "Z"
+    except (FileNotFoundError, ProcessLookupError, ValueError, IndexError,
+            OSError):
+        return False
+
+
 def is_live(info: LockInfo) -> bool:
-    """True when the locked pid exists AND its start time matches the record."""
+    """True when the locked pid exists (non-zombie) AND start time matches."""
     if info.remote:
         return remote_reachable(info.ws_endpoint)
     if info.pid <= 0:
@@ -74,6 +99,8 @@ def is_live(info: LockInfo) -> bool:
         return False
     except PermissionError:
         pass  # exists but owned by someone else — still "live"
+    if _is_zombie(info.pid):
+        return False
     if info.started_at <= 0:
         return True  # pre-starttime lock: trust pid liveness
     return _proc_start_time(info.pid) == info.started_at
@@ -97,18 +124,21 @@ def remote_reachable(ws_endpoint: str | None, timeout: float = 5.0) -> bool:
 
 
 def acquire(name: str, pid: int, cdp_port: int, ws_endpoint: str | None,
-            remote: bool = False) -> None:
+            remote: bool = False, engine: str = "cloakbrowser",
+            headed: bool = False) -> None:
     """Write the lock. Raises ProfileInUseError if a live lock already exists."""
     existing = read_lock(name)
     if existing and is_live(existing):
         raise ProfileInUseError(name, existing)
     paths.ensure_layout()
     atomic_write_json(paths.lock_path(name),
-                        {"pid": pid,
-                         "startedAt": _proc_start_time(pid) if not remote else 0.0,
-                         "cdpPort": cdp_port,
-                         "wsEndpoint": ws_endpoint,
-                         "remote": remote})
+                      {"pid": pid,
+                       "startedAt": _proc_start_time(pid) if not remote else 0.0,
+                       "cdpPort": cdp_port,
+                       "wsEndpoint": ws_endpoint,
+                       "remote": remote,
+                       "engine": engine,
+                       "headed": headed})
 
 
 def release(name: str, *, expect_pid: int | None = None) -> bool:
