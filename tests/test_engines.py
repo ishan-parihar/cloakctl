@@ -76,19 +76,17 @@ def test_resolve_default_fallback_without_obscura(state, monkeypatch):
 
 def test_find_obscura_checks_local_bin(state, monkeypatch):
     monkeypatch.setattr("cloakctl.engines.shutil.which", lambda _: None)
-    fake = state / "bin" / "obscura"
+    fake = state / ".local" / "bin" / "obscura"
     fake.parent.mkdir(parents=True)
     fake.write_text("#!/bin/sh\n")
     fake.chmod(0o755)
-    monkeypatch.setattr("cloakctl.engines.os.path.expanduser",
-                        lambda p: str(state / "bin" / "obscura"))
+    monkeypatch.setenv("HOME", str(state))  # search is $HOME-relative
     assert find_obscura() == str(fake)
 
 
 def test_find_obscura_missing(state, monkeypatch):
     monkeypatch.setattr("cloakctl.engines.shutil.which", lambda _: None)
-    monkeypatch.setattr("cloakctl.engines.os.path.expanduser",
-                        lambda p: str(state / "nope" / "obscura"))
+    monkeypatch.setenv("HOME", str(state / "nope"))
     assert find_obscura() is None
 
 

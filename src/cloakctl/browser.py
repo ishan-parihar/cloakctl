@@ -73,8 +73,9 @@ def find_browser_binary() -> str:
 @functools.lru_cache(maxsize=1)
 def _search_home_cloakbrowser() -> str | None:
     """Cached: walking ~/.cloakbrowser on every open/doctor is seconds."""
-    # cloakbrowser npm package installs its binary under ~/.cloakbrowser
-    home_cb = Path.home() / ".cloakbrowser"
+    # cloakbrowser npm package installs its binary under ~/.cloakbrowser;
+    # resolve via $HOME (expanduser can disagree under systemd/cron).
+    home_cb = (Path(os.environ.get("HOME") or Path.home())) / ".cloakbrowser"
     if home_cb.exists():
         for binpath in sorted(home_cb.rglob("chrome")):
             if binpath.is_file() and os.access(binpath, os.X_OK):
@@ -129,7 +130,13 @@ def open_profile(name: str, *, headed: bool = False,
     if endpoint:
         return _open_remote(name, endpoint)
     paths.ensure_layout()
-    paths.profile_dir(name).mkdir(parents=True, exist_ok=True)
+    # Local launches require an EXISTING profile: a typo in `open profilen`
+    # must be a clean JSON error, never a surprise browser launch. (Remote
+    # attach creates its attach-only record explicitly instead.)
+    if not paths.profile_dir(name).exists():
+        raise RuntimeError(
+            f"profile {name!r} does not exist; create it first with "
+            f"`cloakctl profiles create {name}`")
 
     existing = read_lock(name)
     if existing and is_live(existing):

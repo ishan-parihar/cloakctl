@@ -20,20 +20,27 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
 
 ENGINE_OBScura = "obscura"
 ENGINE_CB = "cloakbrowser"
 ENGINES = (ENGINE_OBScura, ENGINE_CB)
 
 
+def _home() -> Path:
+    """The caller's HOME — expanduser can disagree with $HOME under systemd,
+    cron, or sanitized envs; installs land where $HOME points."""
+    return Path(os.environ.get("HOME") or Path.home())
+
+
 def find_obscura() -> str | None:
-    """Path to the obscura binary (PATH first, then ~/.local/bin)."""
+    """Path to the obscura binary (PATH first, then $HOME/.local/bin)."""
     p = shutil.which("obscura")
     if p:
         return p
-    home = os.path.expanduser("~/.local/bin/obscura")
-    if os.path.isfile(home) and os.access(home, os.X_OK):
-        return home
+    home = _home() / ".local" / "bin" / "obscura"
+    if home.is_file() and os.access(home, os.X_OK):
+        return str(home)
     return None
 
 
@@ -44,8 +51,8 @@ def find_cloakbrowser() -> str | None:
         p = shutil.which(b)
         if p:
             return p
-    home = os.path.expanduser("~/.cloakbrowser")
-    if os.path.isdir(home):
+    home = _home() / ".cloakbrowser"
+    if home.is_dir():
         for root, _dirs, files in os.walk(home):
             if "chrome" in files:
                 p = os.path.join(root, "chrome")
