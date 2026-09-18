@@ -29,6 +29,40 @@ skills/cloakctl/scripts/smoke.sh   # 11-check end-to-end on an isolated state di
 
 Opt out of the obscura download with `./install.sh --engine cloakbrowser` (needs a Chromium-family browser on PATH; override the binary with `CLOAKCTL_BROWSER`).
 
+## MCP server
+
+The same operations are exposed as MCP tools over stdio — install gives you
+both binaries:
+
+```json
+{"mcpServers": {"cloakctl": {"command": "cloakctl-mcp", "args": []}}}
+```
+
+25 tools named `cloakctl_{verb}` (`cloakctl_open`, `cloakctl_snapshot`,
+`cloakctl_act`, `cloakctl_wf_run`, …). Core failures arrive as tool errors
+with an `error:` line plus a `help:` line naming the fixing command — agents
+self-correct without a retry ladder. The MCP server is the right default for
+harnesses that speak MCP; the CLI is right for shell loops and pipes.
+
+### Agent-harness integrations
+
+`install.sh` detects installed harnesses and wires cloakctl in (best-effort,
+never fatal). Manual setup for fresh installs:
+
+| Harness | Command |
+|---|---|
+| **hermes-agent** | `./install.sh` auto-syncs `integrations/hermes/browser-cloakctl/` → `~/.hermes/hermes-agent/plugins/browser/cloakctl/`; or: `cp -r integrations/hermes/browser-cloakctl ~/.hermes/hermes-agent/plugins/browser/cloakctl` then set `browser.cloud_provider: cloakctl` in config.yaml |
+| **opencode** | merge `{"mcp": {"cloakctl": {"type": "local", "command": ["cloakctl-mcp"]}}}` into `~/.config/opencode/opencode.json` |
+| **omp** | add to `~/.omp/agent.toml`: `[mcpServers.cloakctl]` + `command = "cloakctl-mcp"` |
+| **codex** | add to `~/.codex/config.toml`: `[mcp_servers.cloakctl]` + `command = "cloakctl-mcp"` |
+| **claude code** | `claude mcp add cloakctl -- cloakctl-mcp` |
+
+The hermes plugin is the deep integration: it registers a local
+`BrowserProvider` (persistent per-profile browser, cookie persistence across
+agent turns). Note it drives profiles with `--engine cloakbrowser` because
+obscura's per-connection CDP cannot be shared with hermes' browser driver.
+All other harnesses consume the MCP server.
+
 ## Quick start
 
 ```bash
@@ -40,7 +74,8 @@ cloakctl act linkedin click --ref e3
 cloakctl close linkedin
 ```
 
-Every verb works over `--json` for agents; humans can drop the flag.
+Every verb works over `--json` for agents (`--toon` for token-efficient TOON
+output; bare `cloakctl` shows a live home view); humans can drop the flag.
 
 ## The compounding loop
 

@@ -23,6 +23,36 @@ One persistent stealth browser per profile, driven entirely by CLI verbs over
 reusable automations. No server, no pool, no database, no filesystem access
 needed: the whole lifecycle is inline CLI.
 
+## Two surfaces, one core
+
+- **CLI** (`cloakctl`): shell verbs, `--json` for machine output, `--toon` for
+  token-efficient TOON output. Bare `cloakctl` prints a live home view
+  (profiles, live count, next actions).
+- **MCP** (`cloakctl-mcp`): the same operations as MCP tools named
+  `cloakctl_{verb}` (25 tools) over stdio. Register once in the agent harness
+  config:
+
+```json
+{"mcpServers": {"cloakctl": {"command": "cloakctl-mcp", "args": []}}}
+```
+
+Tool errors arrive as `is_error: true` content with an `error:` line and a
+`help:` line naming the fixing command — the agent self-corrects without a
+retry ladder. Both surfaces share the same core functions, so behavior cannot
+drift between them.
+
+Harness integrations (fresh installs — `install.sh` wires these when the
+harness is detected):
+
+- **hermes-agent**: plugin at `~/.hermes/hermes-agent/plugins/browser/cloakctl`
+  (vendored in the repo at `integrations/hermes/browser-cloakctl/`). Select
+  via `browser.cloud_provider: cloakctl`. The provider opens with
+  `--engine cloakbrowser` — obscura's per-connection CDP cannot serve hermes'
+  external attach.
+- **opencode / omp / codex / claude code**: register `cloakctl-mcp` as an
+  MCP server (exact snippets in the repo README, "Agent-harness
+  integrations").
+
 Product README (full command reference): the cloakctl repo at
 `internet/cloakctl/` in this project (or `npx skills add ishan-parihar/cloakctl`).
 

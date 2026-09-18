@@ -8,15 +8,79 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
 from . import browser, cookies, hist, pageops, paths, skills, snap, tabs, workflows
 
 
+def _toon_scalar(v) -> str:
+    """One TOON cell/field: numbers, bools, null bare; strings quoted only when needed."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s.startswith("~") or len(s) > 160:
+        n = len(s)
+        s = s[:120] + f"…(+{n - 120} chars)"
+    if any(c in s for c in (",", "\"", "\n")):
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    return s
+
+
+def _toon(data, _depth: int = 0) -> str:
+    """Render a JSON-shaped doc as TOON (token-oriented output) at the boundary.
+    Internal logic stays JSON — this is display-only (AXI §1)."""
+    pad = "  " * _depth
+    if isinstance(data, dict):
+        if not data:
+            return f"{pad}{{}}"
+        lines = []
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                if isinstance(v, list) and v and all(not isinstance(i, (dict, list)) for i in v):
+                    lines.append(f"{pad}{k}[{len(v)}]: " + ", ".join(_toon_scalar(i) for i in v))
+                elif isinstance(v, list) and v and all(isinstance(i, dict) for i in v):
+                    keys: list[str] = []
+                    for item in v:
+                        for ik in item:
+                            if ik not in keys:
+                                keys.append(ik)
+                    lines.append(f"{pad}{k}[{len(v)}]{{{','.join(keys)}}}:")
+                    for item in v:
+                        lines.append(f"{pad}  " + ",".join(_toon_scalar(item.get(kk)) for kk in keys))
+                elif not v:
+                    lines.append(f"{pad}{k}[0]:")
+                else:
+                    lines.append(f"{pad}{k}:")
+                    lines.append(_toon(v, _depth + 1))
+            else:
+                lines.append(f"{pad}{k}: {_toon_scalar(v)}")
+        return "\n".join(lines)
+    if isinstance(data, list):
+        if not data:
+            return f"{pad}[]"
+        if all(not isinstance(i, (dict, list)) for i in data):
+            return f"{pad}" + ", ".join(_toon_scalar(i) for i in data)
+        return "\n".join(f"{pad}- {_toon(i, _depth + 1).lstrip()}" if isinstance(i, (dict, list))
+                         else f"{pad}- {_toon_scalar(i)}" for i in data)
+    return f"{pad}{_toon_scalar(data)}"
+
+
+# Output mode for _emit, set once in main(). Module-level so the 40+ call
+# sites stay untouched: cmd functions are also called directly by tests.
+_OUT_TOON = False
+
+
 def _emit(data: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps(data, indent=2, default=str))
+    elif _OUT_TOON:
+        print(_toon(data))
     else:
         for k, v in data.items():
             if isinstance(v, list):
@@ -370,7 +434,8 @@ def cmd_skill(args) -> int:
 
 
 _JSON_PARENT = argparse.ArgumentParser(add_help=False)
-_JSON_PARENT.add_argument("--json", dest="json_", action="store_true", default=argparse.SUPPRESS, help="machine-readable output")
+_JSON_PARENT.add_argument("--json", dest="json_", action="store_true", default=argparse.SUPPRESS, help="machine-readable JSON output")
+_JSON_PARENT.add_argument("--toon", dest="toon_", action="store_true", default=argparse.SUPPRESS, help="token-efficient TOON output (AXI)")
 
 
 def _version() -> str:
@@ -382,10 +447,53 @@ def _version() -> str:
         return "0.1.0"
 
 
+def _home_view() -> int:
+    """AXI §8/§10: no args → identify + live content first, help as `help` hints."""
+    print(f"bin: {_self_path()}")
+    print("description: Persistent stealth browser automation for AI agents "
+          "— one profile = one session.")
+    try:
+        profiles = browser.list_profiles()
+    except Exception:
+        profiles = []
+    live = [p for p in profiles if p.get("live")]
+    print(f"profiles: {len(profiles)} ({len(live)} live)")
+    if profiles:
+        for p in profiles[:6]:
+            url = p.get("url") or "-"
+            print(f"  {p.get('profile')}: {p.get('engine') or '-'} "
+                  f"live={str(bool(p.get('live'))).lower()} url={url}")
+        if len(profiles) > 6:
+            print(f"  …+{len(profiles) - 6} more — run 'cloakctl profiles list' for all")
+    else:
+        print("profiles: no profiles yet")
+    print("help[2]:")
+    print("  Run 'cloakctl profiles create <name>' to create a profile")
+    print("  Run 'cloakctl open <name>' to launch; 'cloakctl --help' for all verbs")
+    return 0
+
+
+def _self_path() -> str:
+    from pathlib import Path
+    try:
+        p = Path(sys.argv[0]).resolve()
+    except Exception:
+        return "cloakctl"
+    home = os.path.expanduser("~")
+    s = str(p)
+    return "~" + s[len(home):] if home and s.startswith(home) else s
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="cloakctl", description="lean cloakbrowser CLI for AI agents", parents=[_JSON_PARENT])
+    p = argparse.ArgumentParser(
+        prog="cloakctl",
+        description="lean browser CLI for AI agents",
+        parents=[_JSON_PARENT],
+        epilog="defaults: output is human; --json gives machine JSON; "
+               "--toon gives token-efficient TOON (AXI)",
+    )
     p.add_argument("--version", action="version", version=f"cloakctl {_version()}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)  # no args → home view
 
     pp = sub.add_parser("profiles", help="list/create/remove profiles", parents=[_JSON_PARENT])
     psub = pp.add_subparsers(dest="profile_cmd", required=True)
@@ -692,6 +800,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not hasattr(args, "json_"):
         args.json_ = False  # SUPPRESS default — no --json given either position
+    global _OUT_TOON
+    _OUT_TOON = bool(getattr(args, "toon_", False)) and not args.json_
+    if not getattr(args, "cmd", None):
+        return _home_view()  # AXI §8: no args shows live state, not a manual
     t0 = time.monotonic()
     verb = getattr(getattr(args, "func", None), "__name__", "?")
     verb = verb[4:] if verb.startswith("cmd_") else verb

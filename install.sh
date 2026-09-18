@@ -136,6 +136,7 @@ elif [ "$MODE" = "venv" ] || ! command -v pipx >/dev/null 2>&1; then
   "$VENV_DIR/bin/pip" install --quiet "$ROOT"
   mkdir -p "$(dirname "$BIN_LINK")"
   ln -sf "$VENV_DIR/bin/cloakctl" "$BIN_LINK"
+  ln -sf "$VENV_DIR/bin/cloakctl-mcp" "$BIN_LINK-mcp"
   echo "linked: $BIN_LINK -> $VENV_DIR/bin/cloakctl"
 else
   pipx install "$ROOT" 2>/dev/null || pipx install --force "$ROOT"
@@ -144,13 +145,50 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 BIN="$(command -v cloakctl || true)"
 [ -n "$BIN" ] || { echo "install ok but cloakctl not on PATH; add ~/.local/bin to PATH" >&2; exit 1; }
+BINMCP="$(command -v cloakctl-mcp || true)"
+[ -n "$BINMCP" ] || BINMCP="$VENV_DIR/bin/cloakctl-mcp"
 
 # --- 3. verify --------------------------------------------------------------
 echo "cloakctl: $($BIN --version)"
+echo "mcp server: $BINMCP (stdio; register with your agent harness)"
 echo "--- doctor ---"
 "$BIN" doctor || true
 case "$PATH" in *"$HOME/.local/bin"*) ;; *) echo "NOTE: ~/.local/bin is not on your PATH yet" ;; esac
 echo "---"
+# --- 4. agent-harness integrations (best-effort, never fatal) ----------------
+# Each supported harness gets its plugin/registration if that harness is
+# present. Nothing here can fail the install.
+echo "--- agent integrations ---"
+if [ -d "$HOME/.hermes/hermes-agent/plugins/browser" ]; then
+  DEST="$HOME/.hermes/hermes-agent/plugins/browser/cloakctl"
+  mkdir -p "$DEST"
+  cp -f "$ROOT/integrations/hermes/browser-cloakctl/"*.py "$DEST/" 2>/dev/null || true
+  cp -f "$ROOT/integrations/hermes/browser-cloakctl/plugin.yaml" "$DEST/" 2>/dev/null || true
+  echo "hermes: plugin synced to $DEST (browser.cloud_provider: cloakctl)"
+else
+  echo "hermes: not detected — install later with:"
+  echo "  cp -r integrations/hermes/browser-cloakctl ~/.hermes/hermes-agent/plugins/browser/cloakctl"
+fi
+if [ -f "$HOME/.config/opencode/opencode.json" ]; then
+  echo "opencode: add the MCP server (merge into ~/.config/opencode/opencode.json):"
+  echo '  {"mcp": {"cloakctl": {"type": "local", "command": ["cloakctl-mcp"]}}} '
+fi
+if [ -f "$HOME/.omp/agent.toml" ] || [ -d "$HOME/.omp" ]; then
+  echo "omp: register the MCP server in ~/.omp/agent.toml:"
+  echo '  [mcpServers.cloakctl]'
+  echo '  command = "cloakctl-mcp"'
+fi
+if [ "${CODEX_HOME:-}" ] || [ -d "$HOME/.codex" ]; then
+  echo "codex: register the MCP server in ~/.codex/config.toml:"
+  echo '  [mcp_servers.cloakctl]'
+  echo '  command = "cloakctl-mcp"'
+fi
+if [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; then
+  echo "claude code: register the MCP server:"
+  echo '  claude mcp add cloakctl -- cloakctl-mcp'
+fi
+
+echo "--- done ---"
 if [ "$ENGINE" = "obscura" ]; then
   echo "default engine: obscura — just: cloakctl profiles create <name> && cloakctl open <name>"
   echo "opt into the Chromium engine any time: cloakctl open <name> --engine cloakbrowser"
