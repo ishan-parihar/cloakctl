@@ -154,6 +154,9 @@ def open_profile(name: str, *, headed: bool = False,
                     st = kc.status()
                 out["cdpPort"] = st.get("cdpPort", existing.cdp_port)
                 out["url"] = st.get("url", "")
+                if st.get("bridgePort"):
+                    out["bridgePort"] = st["bridgePort"]
+                    out["wsEndpoint"] = st.get("wsEndpoint")
             except Exception:
                 pass  # status probe is best-effort
         return out
@@ -206,15 +209,23 @@ def _open_obscura(name: str, *, headed: bool, extra_args: list[str],
         _kill_tree(pid)
         raise
     paths.touch_last_used(name)
+    url = "about:blank"
+    bridge = {}
     try:
         with KeeperClient(name) as kc:
             st = kc.status()
             url = st.get("url", "about:blank")
+            if st.get("bridgePort"):
+                # The keeper bridge IS the profile's shareable endpoint.
+                bridge = {"bridgePort": st["bridgePort"],
+                          "wsEndpoint": st.get("wsEndpoint")}
     except Exception:
-        url = "about:blank"
+        pass
     out = {"profile": name, "pid": pid, "cdpPort": cdp_port,
-           "wsEndpoint": None, "reattached": False,
+           "wsEndpoint": bridge.get("wsEndpoint"), "reattached": False,
            "engine": ENGINE_OBScura, "url": url}
+    if bridge:
+        out["bridgePort"] = bridge["bridgePort"]
     if stealth:
         out["stealth"] = True
     if headed:
