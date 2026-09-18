@@ -46,9 +46,10 @@ harness is detected):
 
 - **hermes-agent**: plugin at `~/.hermes/hermes-agent/plugins/browser/cloakctl`
   (vendored in the repo at `integrations/hermes/browser-cloakctl/`). Select
-  via `browser.cloud_provider: cloakctl`. The provider opens with
-  `--engine cloakbrowser` — obscura's per-connection CDP cannot serve hermes'
-  external attach.
+  via `browser.cloud_provider: cloakctl`. Runs the DEFAULT obscura engine:
+  the keeper's CDP bridge serves hermes the profile's true session (same
+  page, same cookies) — no Chromium needed. install.sh also wires
+  `cloakctl-mcp` into hermes' `mcp_servers` config.
 - **opencode / omp / codex / claude code**: register `cloakctl-mcp` as an
   MCP server (exact snippets in the repo README, "Agent-harness
   integrations").

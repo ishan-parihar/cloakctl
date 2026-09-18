@@ -165,9 +165,45 @@ if [ -d "$HOME/.hermes/hermes-agent/plugins/browser" ]; then
   cp -f "$ROOT/integrations/hermes/browser-cloakctl/"*.py "$DEST/" 2>/dev/null || true
   cp -f "$ROOT/integrations/hermes/browser-cloakctl/plugin.yaml" "$DEST/" 2>/dev/null || true
   echo "hermes: plugin synced to $DEST (browser.cloud_provider: cloakctl)"
+  # Wire the MCP server into hermes config.yaml (idempotent). `hermes mcp
+  # add` is interactive, so the stanza is written directly — hermes
+  # auto-reloads the mcp_servers section on startup.
+  HERMES_CFG="$HOME/.hermes/config.yaml"
+  if [ -f "$HERMES_CFG" ]; then
+    if python3 - "$HERMES_CFG" "$BINMCP" <<'PYCFG'
+import sys
+path, mcpbin = sys.argv[1], sys.argv[2]
+lines = open(path).read().splitlines(keepends=True)
+# Already configured under mcp_servers? (any indent-2 cloakctl: key)
+in_mcp = False
+for ln in lines:
+    if ln.rstrip("\n") == "mcp_servers:":
+        in_mcp = True
+        continue
+    if in_mcp and ln and not ln[0].isspace():
+        in_mcp = False
+    if in_mcp and ln.rstrip("\n") == "  cloakctl:":
+        print("hermes: mcp_servers.cloakctl already configured")
+        sys.exit(0)
+entry = [f"  cloakctl:\n", f"    command: {mcpbin}\n", "    connect_timeout: 20\n"]
+for i, ln in enumerate(lines):
+    if ln.rstrip("\n") == "mcp_servers:":
+        lines[i+1:i+1] = entry
+        open(path, "w").write("".join(lines))
+        print("hermes: mcp_servers.cloakctl added")
+        sys.exit(0)
+with open(path, "a") as f:
+    f.write("\nmcp_servers:\n" + "".join(entry))
+print("hermes: mcp_servers.cloakctl appended")
+PYCFG
+    then :; else echo "hermes: WARN could not update $HERMES_CFG — run: hermes mcp add cloakctl --command cloakctl-mcp"; fi
+  else
+    echo "hermes: config.yaml not found — run: hermes mcp add cloakctl --command cloakctl-mcp"
+  fi
 else
   echo "hermes: not detected — install later with:"
   echo "  cp -r integrations/hermes/browser-cloakctl ~/.hermes/hermes-agent/plugins/browser/cloakctl"
+  echo "  hermes mcp add cloakctl --command cloakctl-mcp"
 fi
 if [ -f "$HOME/.config/opencode/opencode.json" ]; then
   echo "opencode: add the MCP server (merge into ~/.config/opencode/opencode.json):"

@@ -117,14 +117,18 @@ check("r6b empty endpoint refuses local launch", rc == 1
       and rc2 == 0 and d2.get("live") is False and d2.get("exists") is False,
       f"rc={rc} live={d2.get('live')}")
 
-# r6c: obscura cannot be remote-attached honestly: attach refuses with a
-# pointer to cloakbrowser (the engine string is only reported for obscura
-# profiles; a cloakbrowser profile prints the ws endpoint instead).
+# r6c: obscura attach now rides the keeper's CDP bridge (the true session):
+# attach reports an obscura-labeled ws://127.0.0.1:<bridgePort> endpoint.
 runA("profiles", "create", "m8ob")
 runA("open", "m8ob")
 rc, d = runA("attach", "m8ob")
-check("r6c attach refuses obscura", rc == 1
-      and "per-connection" in (d.get("error", "") + d.get("_raw", "")))
+ws = d.get("wsEndpoint") or ""
+check("r6c attach serves obscura bridge", rc == 0
+      and d.get("engine") == "obscura"
+      and ws.startswith("ws://127.0.0.1:")
+      and "/devtools/browser/" in ws
+      and isinstance(d.get("bridgePort"), int),
+      f"ws={ws[:48]} err={d.get('error', '')[:60]}")
 runA("close", "m8ob")
 
 # r7: close detaches; host browser survives; VPS lock released

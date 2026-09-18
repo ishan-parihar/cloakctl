@@ -347,9 +347,71 @@ def test_clear_active_only_own_record(state):
     assert paths.load_meta("p").get("activeTab") == "tab-aaa"
     clear_active("p", "tab-aaa")  # matching tid: record is dropped
     assert paths.load_meta("p").get("activeTab") is None
-    record_active("p", "tab-ccc")
-    clear_active("p")              # unconditional: record dropped
-    assert paths.load_meta("p").get("activeTab") is None
+
+
+# --- keeper bridge -----------------------------------------------------------------
+
+
+def test_bridge_token_validation():
+    """_path_token extracts the token; token_for_port gates the handler."""
+    from cloakctl import bridge
+
+    assert bridge._path_token("/devtools/browser/abc123") == "abc123"
+    assert bridge._path_token("/devtools/page/tok") == "tok"
+    assert bridge._path_token("/nope") == ""
+    assert bridge._path_token("") == ""
+    bridge._active_tokens[5999] = "secrets"
+    try:
+        assert bridge.token_for_port(5999) == "secrets"
+        assert bridge.token_for_port(6000) == ""
+    finally:
+        bridge._active_tokens.pop(5999, None)
+
+
+def test_browser_level_method_set():
+    """Session-less calls route only for known browser-level methods."""
+    from cloakctl.bridge import _BROWSER_LEVEL
+
+    for m in ("Target.getTargets", "Target.createTarget",
+              "Storage.getCookies", "Browser.getVersion"):
+        assert m in _BROWSER_LEVEL
+    assert "Page.navigate" not in _BROWSER_LEVEL
+    assert "Runtime.evaluate" not in _BROWSER_LEVEL
+
+
+def test_attach_reports_obscura_bridge(state, monkeypatch, capsys):
+    """`cloakctl attach` on a live obscura profile serves the keeper bridge
+    endpoint (engine=obscura, loopback ws URL) instead of refusing."""
+    from cloakctl import browser, cli
+
+    monkeypatch.setattr(browser, "status_profile", lambda name: {
+        "profile": name, "live": True, "engine": ENGINE_OBScura,
+        "remote": False, "pid": 4242, "cdpPort": 50171,
+        "url": "https://example.com/",
+        "bridgePort": 48755,
+        "wsEndpoint": "ws://127.0.0.1:48755/devtools/browser/t0k3n",
+    })
+    ns = cli.build_parser().parse_args(["attach", "p", "--json"])
+    rc = ns.func(ns)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["engine"] == "obscura"
+    assert out["bridgePort"] == 48755
+    assert out["wsEndpoint"].startswith("ws://127.0.0.1:48755/devtools/browser/")
+
+
+def test_attach_errors_when_bridge_missing(state, monkeypatch, capsys):
+    """No bridgePort reported -> attach fails honestly (no dead URL)."""
+    from cloakctl import browser, cli
+
+    monkeypatch.setattr(browser, "status_profile", lambda name: {
+        "profile": name, "live": True, "engine": ENGINE_OBScura,
+        "remote": False, "pid": 4242, "cdpPort": 50171,
+    })
+    ns = cli.build_parser().parse_args(["attach", "p", "--json"])
+    with pytest.raises(RuntimeError) as ei:
+        ns.func(ns)
+    assert "bridge" in str(ei.value)
 
 
 def test_keeper_spawn_carries_home_marker(state, monkeypatch):

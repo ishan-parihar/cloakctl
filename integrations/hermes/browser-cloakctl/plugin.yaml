@@ -1,6 +1,6 @@
 name: browser-cloakctl
-version: 2.0.0
-description: "cloakctl — persistent stealth browser per profile (obscura default, Chromium opt-in) with active-session cookie import. Local stealth alternative to cloud browsers (Browserbase/Browser Use). One browser per profile, CDP on 127.0.0.1, no cloud billing."
+version: 2.1.0
+description: "cloakctl — persistent stealth browser per profile (obscura default ~65MB via the keeper CDP bridge, Chromium opt-in) with active-session cookie import. Local stealth alternative to cloud browsers (Browserbase/Browser Use). One browser per profile, CDP on 127.0.0.1, no cloud billing, fully self-contained."
 author: ishan-parihar
 kind: backend
 provides_browser_providers:

@@ -1,18 +1,20 @@
-"""cloakctl browser provider — local persistent stealth browser.
+"""cloakctl browser provider — local persistent stealth browser (obscura by default).
 
 Implements :class:`agent.browser_provider.BrowserProvider` on top of the
 `cloakctl` CLI. Unlike cloud providers (Browserbase/Browser Use/Firecrawl)
 which create ephemeral cloud sessions per task, cloakctl keeps ONE persistent
 browser per profile on this host. The browser outlives the CLI (setsid) and
-is reachable over CDP on 127.0.0.1.
+is reachable over CDP.
 
-Engine contract (cloakctl 0.3.0):
-  - default engine is **obscura** (~65MB, per-connection isolated CDP). It
-    serves LOCAL CLI/keeper automation; its CDP cannot be shared with other
-    processes, so this provider requests `--engine cloakbrowser` explicitly
-    to obtain a shareable ws endpoint.
-  - cloakbrowser (Chromium-family binary) exposes the classic browser-level
-    ws endpoint that external automation attaches to.
+Engine contract (cloakctl 0.3.1+):
+  - default engine is **obscura** (~65MB RAM, stealth, tracker-blocking).
+    The profile's keeper daemon hosts a loopback CDP **bridge** over its
+    master connection: the endpoint returned by this provider serves the
+    profile's TRUE session (same page, same cookies) — not an empty one.
+    No Chromium download, no cloakbrowser dependency, fully self-contained.
+  - cloakbrowser (Chromium-family) remains available via config
+    (``browser.cloakctl_engine: cloakbrowser``) for users who want it; the
+    provider then uses the engine's native browser-level ws endpoint.
 
 Config keys::
 
@@ -20,20 +22,13 @@ Config keys::
       cloud_provider: "cloakctl"
       cloakctl_profile: "hermes"          # optional, default "hermes"
       cloakctl_bin: "/path/to/cloakctl"  # optional, default auto-discover
+      cloakctl_engine: "obscura"         # optional, default "obscura"
 
 CLI discovery order:
   1. ``browser.cloakctl_bin`` in config.yaml
   2. ``CLOAKCTL_BIN`` env var
-  3. ``cloakctl`` on PATH (pipx/uv install)
+  3. ``cloakctl`` on PATH (install.sh links it to ~/.local/bin)
   4. ``python -m cloakctl`` via the hermes venv
-
-Selection:
-  - Explicit ``browser.cloud_provider: cloakctl`` always routes here (even if
-    the binary is missing — we surface a typed error so the user knows to
-    install it).
-  - Auto-detect (no ``cloud_provider`` set): eligible ONLY when the binary is
-    present. This keeps cloakctl from stealing the local Chromium path for
-    users who never installed it.
 """
 
 from __future__ import annotations
@@ -53,6 +48,7 @@ from agent.browser_provider import BrowserProvider
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PROFILE = "hermes"
+_DEFAULT_ENGINE = "obscura"
 
 
 def _discover_cloakctl_bin() -> Optional[str]:
@@ -90,7 +86,6 @@ def _discover_cloakctl_bin() -> Optional[str]:
             return str(c)
 
     # 5. python -m cloakctl (hermes venv may have it)
-    # Probe cheaply via import check rather than subprocess.
     try:
         import importlib.util
 
@@ -102,23 +97,33 @@ def _discover_cloakctl_bin() -> Optional[str]:
     return None
 
 
-def _get_profile() -> str:
+def _get(key: str, default: str) -> str:
     try:
         from hermes_cli.config import read_raw_config, cfg_get
 
         cfg = read_raw_config()
-        val = cfg_get(cfg, "browser", "cloakctl_profile")
+        val = cfg_get(cfg, "browser", key)
         if val and str(val).strip():
             return str(val).strip()
     except Exception:
         pass
-    return os.environ.get("CLOAKCTL_PROFILE", _DEFAULT_PROFILE).strip() or _DEFAULT_PROFILE
+    return os.environ.get("CLOAKCTL_" + key.upper().replace("CLOAKCTL_", ""),
+                          default).strip() or default
+
+
+def _get_profile() -> str:
+    return _get("cloakctl_profile", _DEFAULT_PROFILE)
+
+
+def _get_engine() -> str:
+    eng = _get("cloakctl_engine", _DEFAULT_ENGINE)
+    return eng if eng in ("obscura", "cloakbrowser") else _DEFAULT_ENGINE
 
 
 def _run_cloakctl(args: list[str], timeout: float = 30) -> Dict[str, Any]:
-    """Run cloakctl and return parsed JSON output.
+    """Run cloakctl and return parsed JSON output (--json machine contract).
 
-    Uses --json for machine-readable output. Raises RuntimeError on non-zero exit.
+    Raises RuntimeError on non-zero exit with the CLI's error text.
     """
     bin_cmd = _discover_cloakctl_bin()
     if not bin_cmd:
@@ -128,7 +133,6 @@ def _run_cloakctl(args: list[str], timeout: float = 30) -> Dict[str, Any]:
             "or set browser.cloakctl_bin in config.yaml"
         )
 
-    # bin_cmd may be "python -m cloakctl" — split the launcher from args.
     if " -m " in bin_cmd:
         parts = bin_cmd.split()
         cmd = [*parts, "--json", *args]
@@ -146,7 +150,6 @@ def _run_cloakctl(args: list[str], timeout: float = 30) -> Dict[str, Any]:
     try:
         return json.loads(out)
     except json.JSONDecodeError:
-        # Some commands print non-JSON on --json failure; surface raw.
         return {"raw": out}
 
 
@@ -186,12 +189,12 @@ class CloakctlBrowserProvider(BrowserProvider):
 
     def create_session(self, task_id: str) -> Dict[str, object]:
         profile = _get_profile()
-        bin_hint = _discover_cloakctl_bin()
-        if not bin_hint:
+        engine = _get_engine()
+        if not _discover_cloakctl_bin():
             raise ValueError(
                 "cloakctl not found. Install: "
                 "git clone https://github.com/ishan-parihar/cloakctl && cd cloakctl && ./install.sh  "
-                "or set browser.cloakctl_bin in config.yaml / CLOAKCTL_BIN env."
+                "or set browser.cloakctl_bin in config.yaml."
             )
 
         # Ensure profile exists (idempotent).
@@ -201,30 +204,44 @@ class CloakctlBrowserProvider(BrowserProvider):
             if "already" not in str(exc).lower():
                 logger.debug("cloakctl profiles create %s: %s", profile, exc)
 
-        # Open with the SHAREABLE engine. obscura (cloakctl's default) has
-        # per-connection-isolated CDP: a second connection sees an empty
-        # session, so external attach must ride cloakbrowser.
-        data = _run_cloakctl(["open", profile, "--engine", "cloakbrowser"], timeout=90)
+        # Open (or idempotently re-attach). obscura is the default: the
+        # keeper + CDP bridge serve the profile's true session. Extra args
+        # for obscura: --stealth is a first-class flag; private-network
+        # access for localhost test targets is granted here because hermes
+        # commonly drives localhost URLs.
+        open_args = ["open", profile]
+        if engine == "obscura":
+            open_args += ["--browser-arg=--allow-private-network"]
+        else:
+            open_args += ["--engine", "cloakbrowser"]
+        data = _run_cloakctl(open_args, timeout=120)
 
-        engine = data.get("engine")
+        got_engine = data.get("engine")
         pid = data.get("pid")
         cdp_port = data.get("cdpPort")
         ws_endpoint = data.get("wsEndpoint") or ""
 
-        if engine == "obscura" or (not ws_endpoint and not cdp_port):
-            # The host has no Chromium-family binary for cloakbrowser to use.
+        if engine == "cloakbrowser" and got_engine == "obscura":
+            # cloakbrowser requested but fell back (no Chromium binary).
             raise RuntimeError(
-                "cloakctl open returned no shareable CDP endpoint. cloakctl's "
-                "default engine (obscura) cannot serve external attach — this "
-                "provider needs a Chromium-family browser (chromium/chrome/"
-                "brave/edge) on PATH for --engine cloakbrowser. Check: "
-                "cloakctl doctor"
+                "cloakctl could not use cloakbrowser (no Chromium-family "
+                "browser on PATH). Either install one, or use the default "
+                "self-contained obscura engine (browser.cloakctl_engine: "
+                "obscura). Check: cloakctl doctor"
             )
 
-        # If wsEndpoint missing but cdpPort present, derive it.
+        # obscura: wsEndpoint (when present) is the keeper BRIDGE — the true
+        # session. Derive fallbacks from cdpPort if needed.
+        if got_engine == "obscura" and not ws_endpoint and cdp_port:
+            # Older keeper without bridge support: surface a typed error.
+            raise RuntimeError(
+                "cloakctl keeper did not report a CDP bridge endpoint. "
+                "Upgrade cloakctl (git pull + ./install.sh) — obscura "
+                "attach requires the bridge. Check: cloakctl doctor"
+            )
+
         if not ws_endpoint and cdp_port:
             ws_endpoint = f"ws://127.0.0.1:{cdp_port}/devtools/browser"
-            # Try to resolve the concrete ws url via /json/version
             info = _http_json(f"http://127.0.0.1:{cdp_port}/json/version", timeout=3)
             if info and info.get("webSocketDebuggerUrl"):
                 ws_endpoint = info["webSocketDebuggerUrl"]
@@ -239,8 +256,9 @@ class CloakctlBrowserProvider(BrowserProvider):
         reattached = bool(data.get("reattached"))
 
         logger.info(
-            "cloakctl session %s (profile=%s engine=%s reattached=%s pid=%s port=%s)",
-            session_name, profile, engine, reattached, pid, cdp_port,
+            "cloakctl session %s (profile=%s engine=%s reattached=%s pid=%s bridge=%s)",
+            session_name, profile, got_engine, reattached, pid,
+            data.get("bridgePort"),
         )
 
         return {
@@ -251,7 +269,8 @@ class CloakctlBrowserProvider(BrowserProvider):
             "features": {
                 "cloakctl": True,
                 "persistent": True,
-                "engine": engine,
+                "engine": got_engine,
+                "bridge": bool(data.get("bridgePort")),
                 "reattached": reattached,
                 "pid": pid,
                 "cdpPort": cdp_port,
@@ -281,7 +300,8 @@ class CloakctlBrowserProvider(BrowserProvider):
         return {
             "name": "cloakctl",
             "badge": "local",
-            "tag": "Persistent stealth browser — local engine with per-profile cookie persistence",
+            "tag": ("Persistent stealth browser (obscura, ~65MB) — per-profile "
+                    "cookie persistence, self-contained, no cloud"),
             "env_vars": [],
             "post_setup": "",
         }

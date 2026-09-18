@@ -12,7 +12,8 @@ Find your error, read the cause, apply the fix.
 | `no browser binary found` | no Chromium on PATH (cloakbrowser engine) | install one, or `CLOAKCTL_BROWSER=/path/to/chrome`, or use the default: `open <p> --engine obscura` |
 | `engine 'obscura' requested but no obscura binary found` | obscura not installed | `./install.sh --obscura-only` (downloads the binary), or `open --engine cloakbrowser` |
 | `--endpoint was empty` / `CLOAKCTL_CDP_URL was empty` | remote mode asked for with no URL | set a `wss://...` URL, or unset the env var to launch locally |
-| `attach` refuses: `per-connection CDP` | profile runs obscura — no shareable endpoint | remote mode needs Chromium: on the browser host `open <p> --engine cloakbrowser`, then tunnel its ws endpoint |
+| `attach` serves `ws://127.0.0.1:<port>/devtools/browser/<token>` on obscura | that's the keeper CDP bridge — the profile's true session (loopback + token) | attach external CDP clients there; it is loopback-only, not a network service |
+| `attach` errors: `no shareable bridge endpoint` | keeper pre-dates the bridge (old cloakctl) | upgrade: `git pull && ./install.sh`, then `close <p> && open <p>` |
 | warning: `remote browser looks like obscura` | endpoint fronts obscura; verbs would see an EMPTY session | host must relaunch with `--engine cloakbrowser` before tunneling |
 | `download: not supported by the obscura engine` | obscura accepts the CDP call but writes no file | fetch bytes with `run`-style JS (`await fetch(url).then(r=>r.blob())`) or use `--engine cloakbrowser` |
 | `no History db for profile X` (obscura) | obscura writes no Chromium History sqlite | use `audit <profile>` trails |

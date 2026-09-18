@@ -263,7 +263,8 @@ def _serve_profile(profile: str, engine_bin: str, stealth: bool,
                    engine_args: list[str], serve_port: int | None) -> int:
     """Keeper main loop. Exits nonzero on startup failure."""
     from . import paths
-    from .cdp import CdpClient, CdpError
+    from .bridge import BridgeError, MasterConnection, start_bridge
+    from .cdp import CdpError
 
     _klog(profile, "serve: start")
     sock_path = keeper_sock_path(profile)
@@ -322,45 +323,54 @@ def _serve_profile(profile: str, engine_bin: str, stealth: bool,
         return 4
     _klog(profile, "serve: engine port listening")
 
+    # The master connection: the keeper's own session on the engine. All
+    # local ops AND the external bridge ride this one connection.
     ws = f"ws://127.0.0.1:{cdp_port}/devtools/browser"
+    master = None
     deadline = time.monotonic() + 30
-    cdp = None
+    last_err: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            cdp = CdpClient(ws, timeout=120.0)
-            cdp.connect()
-            cdp.call("Browser.getVersion")
+            master = MasterConnection(ws)
+            master.start()
             break
         except Exception as e:
-            _klog(profile, f"serve: cdp connect retry: {type(e).__name__}: {e}")
-            if cdp is not None:
-                try: cdp.close()
+            last_err = e
+            if master is not None:
+                try: master.close()
                 except Exception: pass
-                cdp = None
+                master = None
             time.sleep(0.2)
-    if cdp is None:
-        _klog(profile, "serve: FAIL cdp connect deadline")
+    if master is None:
+        _klog(profile, f"serve: FAIL master connect ({last_err})")
         try: engine.kill()
         except Exception: pass
         return 5
-    _klog(profile, "serve: cdp connected")
+    _klog(profile, "serve: master connected")
 
     # Bind the page ONCE — the keeper's session is the profile's session.
     try:
-        t = cdp.create_target("about:blank")
-        cdp.bind_target(t.get("targetId"))
-    except Exception as e:
+        master.bind_page("about:blank")
+    except (CdpError, Exception) as e:
         _klog(profile, f"serve: FAIL page bind: {type(e).__name__}: {e}")
         try: engine.kill()
         except Exception: pass
         return 6
-    _klog(profile, "serve: page bound — accept loop starting")
+    _klog(profile, "serve: page bound")
 
-    state = {"engine_port": cdp_port, "started": time.time()}
+    # Shareable endpoint: a loopback CDP bridge over the master connection.
+    # External clients (hermes/agent-browser --cdp) attach HERE and get the
+    # profile's true session. Failure is non-fatal: local CLI automation
+    # works without it; open()/attach just report no shareable endpoint.
+    bridge_port, bridge_token = 0, ""
+    try:
+        bridge_port, bridge_token = start_bridge(master, profile)
+        _klog(profile, f"serve: bridge ready port={bridge_port}")
+    except Exception as e:
+        _klog(profile, f"serve: bridge unavailable ({type(e).__name__}: {e})")
 
-    # One CDP client behind a lock: verbs are sequential per profile
-    # (single-writer contract); this guards socket framing only.
-    cdp_lock = threading.Lock()
+    state = {"engine_port": cdp_port, "started": time.time(),
+             "bridge_port": bridge_port, "bridge_token": bridge_token}
 
     def handle(conn: socket.socket) -> None:
         _klog(profile, "handle: connection accepted")
@@ -378,29 +388,32 @@ def _serve_profile(profile: str, engine_bin: str, stealth: bool,
                     if op == "ping":
                         out = {"id": rid, "ok": True, "result": {"pong": True}}
                     elif op == "status":
-                        with cdp_lock:
-                            try:
-                                url = cdp.evaluate("location.href") or ""
-                            except CdpError:
-                                url = ""
-                        out = {"id": rid, "ok": True, "result": {
-                            "profile": profile, "engine": "obscura",
-                            "cdpPort": state["engine_port"], "url": url,
-                            "uptimeSec": round(time.time() - state["started"], 1)}}
+                        try:
+                            url = master.evaluate("location.href") or ""
+                        except CdpError:
+                            url = ""
+                        res = {"profile": profile, "engine": "obscura",
+                               "cdpPort": state["engine_port"], "url": url,
+                               "uptimeSec": round(time.time() - state["started"], 1)}
+                        if state["bridge_port"]:
+                            res["bridgePort"] = state["bridge_port"]
+                            res["bridgeToken"] = state["bridge_token"]
+                            res["wsEndpoint"] = (
+                                f"ws://127.0.0.1:{state['bridge_port']}"
+                                f"/devtools/browser/{state['bridge_token']}")
+                        out = {"id": rid, "ok": True, "result": res}
                     elif op == "call":
                         _arm_watchdog(engine, profile)
                         try:
-                            with cdp_lock:
-                                res = cdp.call(req.get("method", ""),
-                                               req.get("params") or {})
+                            res = master.call(req.get("method", ""),
+                                              req.get("params") or {})
                         finally:
                             _disarm_watchdog()
                         out = {"id": rid, "ok": True, "result": res}
                     elif op == "evaluate":
                         _arm_watchdog(engine, profile)
                         try:
-                            with cdp_lock:
-                                val = cdp.evaluate(req.get("expression", ""))
+                            val = master.evaluate(req.get("expression", ""))
                         finally:
                             _disarm_watchdog()
                         out = {"id": rid, "ok": True, "result": {"value": val}}
@@ -452,7 +465,7 @@ def _serve_profile(profile: str, engine_bin: str, stealth: bool,
         _klog(profile, "serve: engine exited — tearing down")
         try: engine.kill()
         except Exception: pass
-        try: cdp.close()
+        try: master.close()
         except Exception: pass
         try: server.close()
         except Exception: pass

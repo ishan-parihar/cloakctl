@@ -5,11 +5,17 @@ over a tunnel instead of launching. The VPS side holds only refs/meta and is
 idle Python (~0 persistent RAM); the browser lives on the host that has it.
 
 > **Remote mode is a cloakbrowser (Chromium-family) feature.** obscura's CDP
-> is per-connection isolated — a second connection gets its own empty page
-> and an empty cookie jar — so a tunneled obscura serve would accept the
-> attach and then run every verb against an EMPTY session. The browser host
-> must launch the profile with `--engine cloakbrowser` before you tunnel it
-> (`attach` on an obscura profile refuses with this explanation).
+> is per-connection isolated — a second connection to `obscura serve` gets
+> its own empty page and an empty cookie jar — so a tunneled obscura serve
+> would accept the attach and then run every verb against an EMPTY session.
+> The browser host must launch the profile with `--engine cloakbrowser`
+> before you tunnel it.
+>
+> **Local attach on obscura works via the keeper bridge**: the keeper hosts
+> a loopback CDP endpoint over its master connection — the profile's TRUE
+> session (same page, same cookies). `cloakctl attach <p>` prints it; hermes
+> /agent-browser/playwright attach there. Tunneling it is not recommended:
+> loopback + per-keeper token is designed for same-host clients only.
 
 ## Topology
 

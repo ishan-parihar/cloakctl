@@ -59,8 +59,10 @@ never fatal). Manual setup for fresh installs:
 
 The hermes plugin is the deep integration: it registers a local
 `BrowserProvider` (persistent per-profile browser, cookie persistence across
-agent turns). Note it drives profiles with `--engine cloakbrowser` because
-obscura's per-connection CDP cannot be shared with hermes' browser driver.
+agent turns) and `install.sh` also wires `cloakctl-mcp` into hermes'
+`mcp_servers` config. It runs on the **default obscura engine** — the
+keeper's CDP bridge serves hermes the profile's true session, so no Chromium
+or cloakbrowser dependency is needed (~65MB total vs 2GB+).
 All other harnesses consume the MCP server.
 
 ## Quick start
@@ -134,8 +136,13 @@ The VPS holds only refs/meta (idle Python, ~0 persistent RAM). Do the cookie `im
 > Remote mode is **cloakbrowser-only**: obscura's CDP is per-connection
 > isolated (a second connection sees an empty session), so the browser host
 > runs `open <p> --engine cloakbrowser` before tunneling. An empty endpoint
-> is refused outright — never a silent local launch — and `attach` on an
-> obscura profile says exactly that.
+> is refused outright — never a silent local launch.
+>
+> **Local attach is different**: `cloakctl attach <obscura-profile>` serves
+> the keeper's CDP **bridge** — a loopback endpoint over the keeper's master
+> connection that IS the profile's real session (same page, same cookies).
+> External CDP clients (hermes/agent-browser `--cdp`, playwright) attach
+> there. Loopback + per-keeper token; not a network service.
 
 ## Resource profile
 

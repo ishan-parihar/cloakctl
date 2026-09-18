@@ -656,6 +656,12 @@ def status_profile(name: str) -> dict:
                     out["cdpPort"] = st.get("cdpPort", info.cdp_port)
                     out["url"] = st.get("url", "")
                     out["engineUptimeSec"] = st.get("uptimeSec")
+                    if st.get("bridgePort"):
+                        # Shareable endpoint: the keeper's CDP bridge over
+                        # its master connection — this IS the profile's real
+                        # session (same page, same cookies).
+                        out["bridgePort"] = st["bridgePort"]
+                        out["wsEndpoint"] = st.get("wsEndpoint")
                 except Exception as exc:
                     out["keeperError"] = str(exc)
                 try:

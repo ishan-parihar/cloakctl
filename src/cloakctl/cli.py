@@ -152,14 +152,18 @@ def cmd_attach(args) -> int:
     if not st.get("live"):
         raise RuntimeError(f"profile {args.profile!r} is not live; run `cloakctl open {args.profile}`")
     if st.get("engine") == "obscura":
-        # obscura's CDP is per-connection isolated: there is no shareable
-        # ws endpoint. Say so instead of printing a null that remote attach
-        # would silently ignore.
-        raise RuntimeError(
-            "obscura profiles expose no attach endpoint (per-connection CDP "
-            "— a second connection sees an empty session). Remote mode is a "
-            "cloakbrowser feature: open the profile with "
-            "`--engine cloakbrowser` on the browser host, then attach.")
+        # The keeper's CDP bridge IS the profile's real session (same page,
+        # same cookies) — attach rides it. No bridge = keeper didn't bind
+        # one (bind failure); say so instead of printing a dead URL.
+        if not st.get("wsEndpoint"):
+            raise RuntimeError(
+                "obscura profile has no shareable bridge endpoint (keeper "
+                "reports no bridge port). Local CLI verbs still work; check "
+                f"the keeper log: ~/.local/share/cloakctl/runtime/keeper.{args.profile}.log")
+        _emit({"profile": args.profile, "engine": "obscura",
+               "wsEndpoint": st["wsEndpoint"], "bridgePort": st.get("bridgePort")},
+              args.json_)
+        return 0
     _emit({"profile": args.profile, "wsEndpoint": st["wsEndpoint"], "cdpPort": st["cdpPort"]}, args.json_)
     return 0
 
