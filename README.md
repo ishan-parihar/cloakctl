@@ -2,7 +2,7 @@
 
 **One persistent stealth browser per profile, driven by CLI verbs over `--json` — with a registry where AI agents save, compose, and compound reusable automations.**
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.4.1-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-94%20unit%20%2B%2054%20live-success)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![Version](https://img.shields.io/badge/version-0.4.2-informational) ![License](https://img.shields.io/badge/license-MIT-green) ![Engine](https://img.shields.io/badge/default%20engine-obscura-6E4B9E) ![Tests](https://img.shields.io/badge/tests-96%20unit%20%2B%2054%20live-success)
 
 Sessions on one profile must be serialized: cookie injection across contexts is the burn vector, the jar lives in the browser, and `open` is single-writer by construction. Agents get verbs, not REST — every failure is a JSON document with a nonzero exit, never a traceback.
 
@@ -26,6 +26,8 @@ git clone https://github.com/ishan-parihar/cloakctl && cd cloakctl
 cloakctl doctor         # engines, locks, memory, evolution hints
 skills/cloakctl/scripts/smoke.sh   # 11-check end-to-end on an isolated state dir
 ```
+
+Each installer run checks the latest Obscura release, verifies its GitHub SHA-256 digest, smoke-tests the candidate, and atomically replaces the managed binary only after validation.
 
 Opt out of the obscura download with `./install.sh --engine cloakbrowser` (needs a Chromium-family browser on PATH; override the binary with `CLOAKCTL_BROWSER`).
 
@@ -158,7 +160,7 @@ State lives in `~/.cloakctl/profiles/<name>/` + `runtime/` — never edit it dir
 ## Contributing & tests
 
 ```bash
-python -m pytest tests/test_core.py tests/test_wf_prod.py tests/test_engines.py tests/test_mcp.py   # 94 unit, no browser
+python -m pytest tests/test_core.py tests/test_wf_prod.py tests/test_engines.py tests/test_mcp.py tests/test_install.py   # 96 unit, no browser
 python tests/live_obscura.py        # 29-check obscura matrix (local fixtures, no external network)
 python tests/live_bridge.py         # 12-check bridge proof: external CDP client == true session
 python tests/live_matrix8.py        # remote-endpoint matrix
@@ -166,4 +168,4 @@ python tests/live_matrix8.py        # remote-endpoint matrix
 
 PRs: green suite, JSON failures, isolated temp `CLOAKCTL_HOME` per run. Doctrine deep-dives: [docs/SKILLS-VS-WF.md](./docs/SKILLS-VS-WF.md) · plans: [docs/PLAN.md](./docs/PLAN.md), [docs/WORKFLOWS-PLAN.md](./docs/WORKFLOWS-PLAN.md). License: [MIT](./LICENSE).
 
-<!-- tests: 94 unit + 29 obscura live + 12 bridge + 14 remote live (matrix8) + 11 smoke -->
+<!-- tests: 96 unit + 29 obscura live + 12 bridge + 14 remote live (matrix8) + 11 smoke -->
