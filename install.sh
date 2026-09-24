@@ -16,7 +16,6 @@ MODE="auto"
 ENGINE="obscura"           # default engine: obscura (cloakbrowser is opt-in)
 OBSCURA_BUILD="stealth"
 OBSCURA_ONLY=0
-PINNED_TAG="v0.2.2"        # fallback when the GitHub API is unreachable
 
 usage() {
   echo "usage: ./install.sh [--engine obscura|cloakbrowser] [--obscura-only]"
@@ -59,9 +58,10 @@ fetch() { # fetch <url> <out>
   else return 1; fi
 }
 
-# --- 0. obscura binary (the default engine) ---------------------------------
 install_obscura() {
-  local os arch flavor asset url tag tmp
+  local os arch asset url tag digest tmp bin name staged replaced checksum_ok
+  need python3 "python3 is required to verify obscura releases"
+
   case "$(uname -s)" in
     Linux) os="linux" ;;
     Darwin) os="macos" ;;
@@ -73,45 +73,101 @@ install_obscura() {
     aarch64|arm64) arch="aarch64" ;;
     *) echo "obscura: unsupported arch $(uname -m)" >&2; return 1 ;;
   esac
-  if [ "$os" = "windows" ]; then asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.zip"
-  else asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.tar.gz"; fi
-  url="https://github.com/h4ckf0r0day/obscura/releases/download/${PINNED_TAG}/${asset}"
-  # latest tag when the API is reachable (asset names are stable across tags)
-  tag="$(fetch https://api.github.com/repos/h4ckf0r0day/obscura/releases/latest /dev/stdout 2>/dev/null \
-        | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-  if [ -n "${tag:-}" ]; then url="${url/$PINNED_TAG/$tag}"; fi
 
-  echo "obscura: downloading ${asset}${tag:+ ($tag)}..."
+  if [ "$os" = "windows" ]; then
+    asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.zip"
+  else
+    asset="obscura-${arch}-${os}-${OBSCURA_BUILD}.tar.gz"
+  fi
+
   tmp="$(mktemp -d)"
+  if ! fetch "https://api.github.com/repos/h4ckf0r0day/obscura/releases/latest" "$tmp/release.json"; then
+    echo "obscura: could not fetch release metadata" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! read -r tag digest < <(
+    python3 - "$tmp/release.json" "$asset" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    release = json.load(stream)
+asset = next((item for item in release.get("assets", []) if item.get("name") == sys.argv[2]), None)
+if asset is None:
+    raise SystemExit(f"release asset not found: {sys.argv[2]}")
+digest = str(asset.get("digest", ""))
+if not digest.startswith("sha256:"):
+    raise SystemExit(f"release asset has no sha256 digest: {sys.argv[2]}")
+print(release["tag_name"], digest.removeprefix("sha256:"))
+PY
+  ); then
+    echo "obscura: invalid release metadata for $asset" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  url="https://github.com/h4ckf0r0day/obscura/releases/download/${tag}/${asset}"
+  echo "obscura: downloading ${asset} (${tag})..."
   if ! fetch "$url" "$tmp/obscura-archive"; then
     echo "obscura: download failed — check your network or grab it manually:" >&2
     echo "  $url" >&2
-    rm -rf "$tmp"; return 1
+    rm -rf "$tmp"
+    return 1
   fi
-  mkdir -p "$HOME/.local/bin"
+  checksum_ok=0
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$digest" "$tmp/obscura-archive" | sha256sum -c - >/dev/null && checksum_ok=1
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$tmp/obscura-archive" | cut -d' ' -f1)"
+    [ "$actual" = "$digest" ] && checksum_ok=1
+  fi
+  if [ "$checksum_ok" -ne 1 ]; then
+    echo "obscura: sha256 verification failed; existing binary left unchanged" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
   if [ "$os" = "windows" ]; then
-    unzip -o -q "$tmp/obscura-archive" -d "$HOME/.local/bin"
+    unzip -o -q "$tmp/obscura-archive" -d "$tmp"
   else
     tar -xzf "$tmp/obscura-archive" -C "$tmp"
-    for bin in "$tmp"/obscura*; do
-      [ -f "$bin" ] || continue
-      install -m 0755 "$bin" "$HOME/.local/bin/$(basename "$bin")"
-    done
   fi
+
+  mkdir -p "$HOME/.local/bin"
+  replaced=0
+  for bin in "$tmp"/obscura*; do
+    [ -f "$bin" ] && [ -x "$bin" ] || continue
+    if ! "$bin" --version >/dev/null 2>&1; then
+      echo "obscura: downloaded binary failed its version check; existing binary left unchanged" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    name="$(basename "$bin")"
+    staged="$HOME/.local/bin/.${name}.$$"
+    install -m 0755 "$bin" "$staged"
+    if ! mv -f "$staged" "$HOME/.local/bin/$name"; then
+      rm -f "$staged"
+      rm -rf "$tmp"
+      return 1
+    fi
+    replaced=1
+  done
   rm -rf "$tmp"
-  command -v obscura >/dev/null 2>&1 || export PATH="$HOME/.local/bin:$PATH"
-  if command -v obscura >/dev/null 2>&1; then
-    echo "obscura: installed -> $(command -v obscura)"
-  else
-    echo "obscura: installed to $HOME/.local/bin (add it to PATH)" >&2
+  if [ "$replaced" -ne 1 ]; then
+    echo "obscura: release archive contained no executable; existing binary left unchanged" >&2
+    return 1
   fi
+
+  export PATH="$HOME/.local/bin:$PATH"
+  echo "obscura: installed $(command -v obscura) ($("$HOME/.local/bin/obscura" --version))"
 }
 
 if [ "$MODE" != "check" ] && [ "$ENGINE" = "obscura" ]; then
-  if command -v obscura >/dev/null 2>&1 || [ -x "$HOME/.local/bin/obscura" ]; then
-    echo "obscura: already present ($(command -v obscura || echo "$HOME/.local/bin/obscura"))"
-  else
-    install_obscura || echo "continuing without obscura — cloakctl will fail to open profiles until it is installed" >&2
+  echo "obscura: checking latest ${OBSCURA_BUILD} release..."
+  if ! install_obscura; then
+    [ "$OBSCURA_ONLY" = "1" ] && exit 1
+    echo "continuing without obscura — cloakctl will fail to open profiles until it is installed" >&2
   fi
 fi
 
