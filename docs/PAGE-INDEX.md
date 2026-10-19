@@ -14,3 +14,4 @@ Status: LIVE (current truth) · EVIDENCE (dated measured verdict) · PLAN-ACTIVE
 | [`CLOSED.md`](kb/CLOSED.md) | LEDGER | What was tried and rejected — do not re-litigate? | — |
 | [`WORKLOG.md`](kb/WORKLOG.md) | LEDGER | What happened, session by session? | — |
 | [`feed.md`](kb/feed.md) | LEDGER | Cross-agent messages, claims, mentions? | — |
+| [`RECORDS.md`](RECORDS.md) | LIVE | Records — decisions (AD) and regressions (RG) — Generated zones below are written by genome rec emit; never hand-edit them. Topic → governing record… | — |
