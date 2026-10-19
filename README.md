@@ -166,6 +166,6 @@ python tests/live_bridge.py         # 12-check bridge proof: external CDP client
 python tests/live_matrix8.py        # remote-endpoint matrix
 ```
 
-PRs: green suite, JSON failures, isolated temp `CLOAKCTL_HOME` per run. Doctrine deep-dives: [docs/SKILLS-VS-WF.md](./docs/SKILLS-VS-WF.md) · plans: [docs/PLAN.md](./docs/PLAN.md), [docs/WORKFLOWS-PLAN.md](./docs/WORKFLOWS-PLAN.md). License: [MIT](./LICENSE).
+PRs: green suite, JSON failures, isolated temp `CLOAKCTL_HOME` per run. Doctrine deep-dives: [docs/SKILLS-VS-WF.md](./docs/SKILLS-VS-WF.md) · plans: [docs/PLAN.md](./docs/PLAN.md), [docs/WORKFLOWS-PLAN.md](./docs/WORKFLOWS-PLAN.md). Every doc in `docs/` with the question it owns: [docs/PAGE-INDEX.md](docs/PAGE-INDEX.md). License: [MIT](./LICENSE).
 
 <!-- tests: 96 unit + 29 obscura live + 12 bridge + 14 remote live (matrix8) + 11 smoke -->
