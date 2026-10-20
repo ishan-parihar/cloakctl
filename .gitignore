@@ -9,3 +9,8 @@ build/
 chrome.log
 .DS_Store
 .pytest_cache/
+
+# genome runtime state (locks, temp files, recon tokens, read marks)
+*.genome-lock
+*.genome-tmp
+.genome/
